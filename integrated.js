@@ -355,6 +355,16 @@ async function runArchive(url) {
     const page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
+
+    await page.setExtraHTTPHeaders({
+      "accept-language": "en-US,en;q=0.9",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    });
+    await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+
+
+
+
     console.log(`🌐 Visiting: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
     
