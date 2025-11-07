@@ -5,6 +5,8 @@ import path from "path";
 import crypto from "crypto";
 import { setTimeout as sleep } from "timers/promises";
 import { fileURLToPath } from "url";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
@@ -19,14 +21,102 @@ const ARCHIVE_BASE = "./archives";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** Convert file size to human-readable string */
 function humanFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-/** Determine if an element is clickable */
+/* -------------------------------------------------------------------------- */
+/*                           SQLITE QUEUE MANAGEMENT                           */
+/* -------------------------------------------------------------------------- */
+
+class PersistentQueue {
+  constructor(dbPath) {
+    this.dbPath = dbPath;
+    this.db = null;
+  }
+
+  async init() {
+    this.db = await open({ filename: this.dbPath, driver: sqlite3.Database });
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL,
+        source_chat_id INTEGER,
+        source_topic_id INTEGER,
+        topic_name TEXT,
+        message_text TEXT,
+        archived_thread_id INTEGER,
+        post_title TEXT,
+        status TEXT DEFAULT 'pending',
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        error_message TEXT,
+        retry_count INTEGER DEFAULT 0,
+        UNIQUE(url)
+      )
+    `);
+    await this.db.exec("CREATE INDEX IF NOT EXISTS idx_status ON queue(status)");
+    await this.db.exec("CREATE INDEX IF NOT EXISTS idx_added_at ON queue(added_at)");
+    console.log(`✅ Queue DB ready at ${this.dbPath}`);
+  }
+
+  async addJob(url) {
+    try {
+      const res = await this.db.run(
+        `INSERT OR IGNORE INTO queue (url,status) VALUES (?, 'pending')`,
+        [url]
+      );
+      if (res.changes === 0) {
+        console.log(`⏭️ Duplicate skipped: ${url}`);
+        return false;
+      }
+      console.log(`📥 Added job: ${url}`);
+      return true;
+    } catch (err) {
+      console.error(`❌ Failed to add job: ${err.message}`);
+      return false;
+    }
+  }
+
+  async getNextJob() {
+    const row = await this.db.get(
+      `SELECT * FROM queue WHERE status='pending' ORDER BY added_at ASC LIMIT 1`
+    );
+    if (!row) return null;
+    await this.db.run(
+      `UPDATE queue SET status='processing', started_at=CURRENT_TIMESTAMP WHERE id=?`,
+      [row.id]
+    );
+    return row;
+  }
+
+  async updateJobStatus(id, status, error = null) {
+    const sql =
+      status === "completed"
+        ? `UPDATE queue SET status=?, completed_at=CURRENT_TIMESTAMP, error_message=? WHERE id=?`
+        : `UPDATE queue SET status=?, error_message=? WHERE id=?`;
+    await this.db.run(sql, [status, error, id]);
+  }
+
+  async getStats() {
+    const rows = await this.db.all(
+      `SELECT status, COUNT(*) as count FROM queue GROUP BY status`
+    );
+    const stats = { total: 0, pending: 0, processing: 0, completed: 0, failed: 0 };
+    for (const r of rows) stats[r.status] = r.count;
+    const total = await this.db.get(`SELECT COUNT(*) as total FROM queue`);
+    stats.total = total.total;
+    return stats;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                    FIND, CLICK, SCROLL, ARCHIVE (your logic)               */
+/* -------------------------------------------------------------------------- */
+
 function isClickable(el) {
   const tag = el.tagName.toLowerCase();
   const clickableTags = ["button", "a", "input"];
@@ -37,17 +127,12 @@ function isClickable(el) {
   return false;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                        MATCH + FIND CLICKABLE ELEMENTS                      */
-/* -------------------------------------------------------------------------- */
-
 async function findMatchingClickableElements(frame, searchTerms) {
   return frame.$$eval(
     "*",
     (elements, searchTerms) => {
       const results = [];
       const terms = searchTerms.map((t) => t.toLowerCase());
-
       const isClickable = (el) => {
         const tag = el.tagName.toLowerCase();
         const clickableTags = ["button", "a", "input"];
@@ -57,15 +142,12 @@ async function findMatchingClickableElements(frame, searchTerms) {
         if (el.tabIndex >= 0) return true;
         return false;
       };
-
       for (const el of elements) {
         if (!isClickable(el)) continue;
         const text = (el.textContent || el.value || "").trim();
         if (!text) continue;
-
         const match = terms.some((t) => text.toLowerCase().includes(t));
         if (!match) continue;
-
         const rect = el.getBoundingClientRect();
         results.push({
           tag: el.tagName.toLowerCase(),
@@ -86,16 +168,10 @@ async function findAllMatchingElements(page, searchTerms) {
     try {
       const found = await findMatchingClickableElements(frame, searchTerms);
       matches.push(...found);
-    } catch {
-      // ignore cross-origin
-    }
+    } catch {}
   }
   return matches;
 }
-
-/* -------------------------------------------------------------------------- */
-/*                              CLICKING LOGIC                                */
-/* -------------------------------------------------------------------------- */
 
 async function simulateMouseClick(page, x, y) {
   const mouse = page.mouse;
@@ -109,9 +185,7 @@ async function simulateMouseClick(page, x, y) {
 async function clickElements(page, elements) {
   for (const el of elements) {
     try {
-      console.log(
-        `🖱️ Clicking <${el.tag}> "${el.text}" at (${el.x.toFixed(0)}, ${el.y.toFixed(0)})`
-      );
+      console.log(`🖱️ Clicking <${el.tag}> "${el.text}"`);
       await simulateMouseClick(page, el.x, el.y);
     } catch (err) {
       console.warn(`⚠️ Failed to click "${el.text}": ${err.message}`);
@@ -119,14 +193,6 @@ async function clickElements(page, elements) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/*                     Scrolling and Lazy Loading Logic                       */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Smoothly scroll through the page to trigger lazy-loaders (IntersectionObservers, etc.)
- * This is a standard pre-capture scroll routine used by archive tools.
- */
 async function triggerLazyLoadScroll(page) {
   await page.evaluate(async () => {
     const totalHeight = document.body.scrollHeight;
@@ -137,17 +203,9 @@ async function triggerLazyLoadScroll(page) {
     }
     window.scrollTo(0, 0);
   });
-  await sleep(1000); // allow late images to render
+  await sleep(1000);
 }
 
-/* -------------------------------------------------------------------------- */
-/*                               URL NORMALIZATION                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Normalize a URL by trimming whitespace, removing query params and fragments.
- * This ensures stable hashing and consistent deduplication.
- */
 function normalizeUrl(rawUrl) {
   try {
     const u = new URL(rawUrl.trim());
@@ -159,36 +217,6 @@ function normalizeUrl(rawUrl) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/*                                SLUG GENERATION                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Produce a human-readable slug from a URL path.
- * Removes generic path tokens (like 'news', 'article', etc.)
- * and ensures filesystem-safe formatting.
- */
-function slugFromUrl(url) {
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean);
-
-    if (!parts.length) return u.hostname;
-
-    const skip = new Set(["news", "article", "post", "view", "en"]);
-    const filtered = parts.filter((p) => !skip.has(p.toLowerCase()));
-    const joined = filtered.join("-") || u.hostname;
-
-    return joined
-      .replace(/[^\w\s-]/g, "")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "");
-  } catch {
-    return "untitled";
-  }
-}
-
-/** Produce a clean slug from an arbitrary title. */
 function slugifyTitle(title) {
   if (!title) return "untitled";
   return title
@@ -197,24 +225,24 @@ function slugifyTitle(title) {
     .replace(/^-+|-+$/g, "");
 }
 
-/* -------------------------------------------------------------------------- */
-/*                               HASH GENERATION                              */
-/* -------------------------------------------------------------------------- */
+function slugFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (!parts.length) return u.hostname;
+    const skip = new Set(["news", "article", "post", "view", "en"]);
+    const filtered = parts.filter((p) => !skip.has(p.toLowerCase()));
+    const joined = filtered.join("-") || u.hostname;
+    return joined.replace(/[^\w\s-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  } catch {
+    return "untitled";
+  }
+}
 
-/** Return a short deterministic MD5 hash for a given string. */
 function md5Hash(input, length = 8) {
   return crypto.createHash("md5").update(input).digest("hex").slice(0, length);
 }
 
-/* -------------------------------------------------------------------------- */
-/*                              ARCHIVE ID BUILDER                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Create the final archive identifier used for folder naming.
- * Combines a URL-derived slug and a short hash of the normalized URL.
- * Example: "india-election-2025_a1b2c3d4"
- */
 function makeArchiveId(url, title) {
   const normalized = normalizeUrl(url);
   const urlHash = md5Hash(normalized, 8);
@@ -222,50 +250,34 @@ function makeArchiveId(url, title) {
   return `${slug}_${urlHash}`;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                                ARCHIVE LOGIC                               */
-/* -------------------------------------------------------------------------- */
-
 async function saveArchive(page, url) {
-  // 🧩 Use unified archive ID (matches puppeteer_fallback.mjs)
   const title = slugFromUrl(url);
   const archiveId = makeArchiveId(url, title);
   const outdir = path.join(ARCHIVE_BASE, archiveId);
   fs.mkdirSync(outdir, { recursive: true });
-
   console.log(`\n🗄️  Starting archive save in: ${outdir}`);
-  console.log(`📦 Archive ID: ${archiveId}`);
 
-  // Save HTML
   const htmlPath = path.join(outdir, "page.html");
   const html = await page.content();
   fs.writeFileSync(htmlPath, html, "utf8");
-  const htmlSize = humanFileSize(fs.statSync(htmlPath).size);
-  console.log(`✅ Saved HTML (${htmlSize}): ${htmlPath}`);
+  console.log(`✅ Saved HTML: ${htmlPath}`);
 
   await triggerLazyLoadScroll(page);
 
-  // Save Screenshot
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
-  const shotSize = humanFileSize(fs.statSync(screenshotPath).size);
-  console.log(`✅ Saved Screenshot (${shotSize}): ${screenshotPath}`);
+  console.log(`✅ Saved Screenshot: ${screenshotPath}`);
 
-  // Wait for network idle before PDF
   try {
     await page.waitForNetworkIdle({ idleTime: 500, timeout: 10000 });
   } catch {}
   await sleep(400);
-
   await triggerLazyLoadScroll(page);
 
-  // Save PDF
   const pdfPath = path.join(outdir, "page.pdf");
   await page.pdf({ path: pdfPath, format: "A4", printBackground: true });
-  const pdfSize = humanFileSize(fs.statSync(pdfPath).size);
-  console.log(`✅ Saved PDF (${pdfSize}): ${pdfPath}`);
+  console.log(`✅ Saved PDF: ${pdfPath}`);
 
-  // Meta info
   const metrics = await page.evaluate(() => ({
     title: document.title,
     width: document.documentElement.scrollWidth,
@@ -280,39 +292,15 @@ async function saveArchive(page, url) {
     metrics,
     archive_id: archiveId,
   };
-
   fs.writeFileSync(path.join(outdir, "meta.json"), JSON.stringify(meta, null, 2));
   console.log("🧾 Saved meta.json");
-
-  console.log(`🎯 Archive successfully completed → ${outdir}\n`);
 }
 
 /* -------------------------------------------------------------------------- */
-/*                             DISPLAY UTILITIES                              */
+/*                              MAIN EXECUTION FLOW                            */
 /* -------------------------------------------------------------------------- */
 
-function printElements(elements, terms) {
-  console.log("\n" + "=".repeat(70));
-  console.log(`Search Terms: ${terms.join(", ")}`);
-  console.log(`Found ${elements.length} clickable element(s)`);
-  console.log("=".repeat(70) + "\n");
-
-  elements.forEach((el, i) => {
-    console.log(`${i + 1}. <${el.tag}> "${el.text}"`);
-  });
-}
-
-/* -------------------------------------------------------------------------- */
-/*                                    MAIN                                    */
-/* -------------------------------------------------------------------------- */
-
-async function main() {
-  const url = process.argv[2];
-  if (!url) {
-    console.error("Usage: node integrated.js <URL>");
-    process.exit(1);
-  }
-
+async function runArchive(url) {
   const browser = await puppeteer.launch({
     headless: "new",
     args: [
@@ -331,28 +319,58 @@ async function main() {
     console.log(`🌐 Visiting: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
 
-    console.log("🔍 Searching for clickable elements...");
     const matches = await findAllMatchingElements(page, SEARCH_TERMS);
-
-    printElements(matches, SEARCH_TERMS);
-
     if (matches.length > 0) {
-      console.log("\n⚡ Clicking matching elements...\n");
       await clickElements(page, matches);
-      await sleep(2000); // wait for UI updates after clicks
-    } else {
-      console.log("\n❌ No matching clickable elements found.\n");
+      await sleep(2000);
     }
-
-    console.log("🗄️  Archiving page...");
     await saveArchive(page, url);
-
-    console.log("✅ All archive tasks completed successfully.");
+    console.log("✅ Archive done.");
+    return true;
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Archive failed:", err);
+    return false;
   } finally {
     await browser.close();
   }
+}
+
+async function processQueue(queue) {
+  console.log("🚀 Starting queue worker...");
+  while (true) {
+    const job = await queue.getNextJob();
+    if (!job) {
+      console.log("📭 No more pending jobs. Worker exiting.");
+      break;
+    }
+    console.log(`📦 Processing job #${job.id}: ${job.url}`);
+    const ok = await runArchive(job.url);
+    await queue.updateJobStatus(job.id, ok ? "completed" : "failed", ok ? null : "Archive failed");
+    const stats = await queue.getStats();
+    console.log(`📊 Stats: ${JSON.stringify(stats)}`);
+  }
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const dbFlagIndex = args.indexOf("--db");
+  const dbPath = dbFlagIndex !== -1 ? args[dbFlagIndex + 1] : null;
+  const url = args.find((a) => a.startsWith("http"));
+
+  if (dbPath && !url) {
+    const queue = new PersistentQueue(dbPath);
+    await queue.init();
+    await processQueue(queue);
+    return;
+  }
+
+  if (url && !dbPath) {
+    await runArchive(url);
+    return;
+  }
+
+  console.error("Usage:\n  node integrated.js <URL>\n  node integrated.js --db ./queue.db");
+  process.exit(1);
 }
 
 main();
