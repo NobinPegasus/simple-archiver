@@ -201,22 +201,19 @@ const metrics = await page.evaluate(() => ({
   height: document.documentElement.scrollHeight,
 }));
 
-await fsp.writeFile(
+const meta = {
+  url,
+  timestamp: new Date().toISOString(),
+  userAgent: await page.evaluate(() => navigator.userAgent),
+  viewport: { width: 1440, height: 900, deviceScaleFactor: 1 },
+  metrics,
+};
+
+fs.writeFileSync(
   path.join(outdir, "meta.json"),
-  JSON.stringify(
-    {
-      url,
-      timestamp: new Date().toISOString(),
-      userAgent: UA,
-      viewport: { width: 1440, height: 900, deviceScaleFactor: 1 },
-      metrics,
-    },
-    null,
-    2
-  )
+  JSON.stringify(meta, null, 2)
 );
 console.log("🧾 Saved meta.json");
-
 
   console.log(`🎯 Archive successfully completed → ${outdir}\n`);
 }
