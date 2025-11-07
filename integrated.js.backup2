@@ -402,8 +402,7 @@ async function saveArchive(page, url) {
   
   await clickPopups(page);
   //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
-
+  await directClickTaboolaCloseButton(page);
 
   const htmlPath = path.join(outdir, "page.html");
   const html = await page.content();
@@ -413,7 +412,8 @@ async function saveArchive(page, url) {
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
   //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
+  await directClickTaboolaCloseButton(page);
+  
 
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -427,7 +427,7 @@ async function saveArchive(page, url) {
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
   //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
+  await directClickTaboolaCloseButton(page);
 
 
   const pdfPath = path.join(outdir, "page.pdf");
@@ -463,92 +463,32 @@ async function enableAdBlock(page) {
   });
 }
 
-
-/**
- * Directly clicks any ad/video overlay close button (PlayStream, Taboola, etc.)
- * Resilient: handles detached nodes, hidden wrappers, and racey DOM states safely.
- */
-async function directClickAnyCloseButton(page) {
+async function directClickTaboolaCloseButton(page) {
   try {
-    const selector = [
-      // 🎯 PlayStream and video overlays
-      '[id^="ps-close-button"]',
-      '[class*="ps-close-button"]',
-      '[id^="ps-display-close-button"]',
-      '[class*="ps-display-close-button"]',
+    // Wait briefly for the Taboola overlay to appear
+    await page.waitForSelector('div[role="button"].tbl-next-up-closeBtn', { timeout: 5000 });
 
-      // 🎯 Taboola overlays
-      '.tbl-next-up-closeBtn',
-      '.tbl-next-up-closeBtn-wrapper',
-
-      // 🎯 Generic fallback
-      '[aria-label*="close" i]',
-      '[role="button"][class*="close" i]'
-    ].join(',');
-
-    // Race-safe timeout: don’t let this hang indefinitely
-    const timeout = 6000;
-    const start = Date.now();
-
-    // Wait at most 6s for any close button to appear
-    while (Date.now() - start < timeout) {
-      const handles = await page.$$(selector);
-      if (!handles.length) {
-        await page.evaluate(() => new Promise(r => setTimeout(r, 250)));
-        continue;
-      }
-
-      for (const handle of handles) {
-        const stillExists = await handle.evaluate(el => !!el.isConnected).catch(() => false);
-        if (!stillExists) continue;
-
-        const visible = await handle.evaluate(el => {
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          return (
-            rect.width > 4 &&
-            rect.height > 4 &&
-            style.visibility !== "hidden" &&
-            style.display !== "none" &&
-            style.opacity !== "0"
-          );
-        }).catch(() => false);
-
-        if (!visible) continue;
-
-        try {
-          await handle.evaluate(el =>
-            el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
-          );
-
-          // Try real DOM click
-          await handle.click({ delay: 50 });
-          console.log("✅ Clicked close button (direct DOM click).");
-          return true;
-        } catch {
-          // Fallback: synthetic event (safe, non-blocking)
-          await page.evaluate(el => {
-            try {
-              const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
-              el.dispatchEvent(evt);
-            } catch {}
-          }, handle).catch(() => {});
-          console.log("✅ Fallback dispatched click event to close button.");
-          return true;
-        }
-      }
-
-      // Small wait before retrying to avoid tight loops
-      await new Promise(r => setTimeout(r, 200));
+    const handle = await page.$('div[role="button"].tbl-next-up-closeBtn');
+    if (!handle) {
+      console.log("⚠️ No Taboola close button found.");
+      return false;
     }
 
-    console.log("⚠️ No visible close button successfully clicked within timeout.");
-    return false;
+    // Scroll into view (helps if hidden below fold)
+    await handle.evaluate(el => el.scrollIntoView({ block: "center", inline: "center" }));
+
+    // Perform a direct click using Puppeteer’s DOM-level input dispatch
+    await handle.click({ delay: 50 });
+
+    console.log("✅ Directly clicked Taboola close button.");
+    return true;
   } catch (err) {
-    console.error("❌ directClickAnyCloseButton failed:", err.message);
+    console.error("❌ Failed to direct-click Taboola close button:", err.message);
     return false;
   }
 }
+
+
 
 
 /* -------------------------------------------------------------------------- */
@@ -572,9 +512,6 @@ async function runArchive(url) {
 
   try {
     const page = await browser.newPage();
-    //await enableAdBlock(page, { log: true });
-
-
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
 
@@ -600,7 +537,8 @@ async function runArchive(url) {
 
 	  
     await clickPopups(page);
-    await directClickAnyCloseButton(page);
+    await directClickTaboolaCloseButton(page);
+
 
     await saveArchive(page, url);
     console.log("✅ Archive done.");

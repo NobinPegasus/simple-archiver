@@ -465,87 +465,57 @@ async function enableAdBlock(page) {
 
 
 /**
- * Directly clicks any ad/video overlay close button (PlayStream, Taboola, etc.)
- * Resilient: handles detached nodes, hidden wrappers, and racey DOM states safely.
+ * Directly clicks any visible ad or overlay close button (PlayStream, Taboola, etc.)
+ * Uses DOM-based clicks (not bounding box) for reliability across layers and SVG elements.
  */
 async function directClickAnyCloseButton(page) {
   try {
     const selector = [
-      // 🎯 PlayStream and video overlays
+      // 🎯 PlayStream variants
       '[id^="ps-close-button"]',
       '[class*="ps-close-button"]',
       '[id^="ps-display-close-button"]',
       '[class*="ps-display-close-button"]',
 
-      // 🎯 Taboola overlays
+      // 🎯 Taboola variants
       '.tbl-next-up-closeBtn',
       '.tbl-next-up-closeBtn-wrapper',
 
-      // 🎯 Generic fallback
+      // 🎯 Generic close buttons
       '[aria-label*="close" i]',
       '[role="button"][class*="close" i]'
     ].join(',');
 
-    // Race-safe timeout: don’t let this hang indefinitely
-    const timeout = 6000;
-    const start = Date.now();
-
-    // Wait at most 6s for any close button to appear
-    while (Date.now() - start < timeout) {
-      const handles = await page.$$(selector);
-      if (!handles.length) {
-        await page.evaluate(() => new Promise(r => setTimeout(r, 250)));
-        continue;
-      }
-
-      for (const handle of handles) {
-        const stillExists = await handle.evaluate(el => !!el.isConnected).catch(() => false);
-        if (!stillExists) continue;
-
-        const visible = await handle.evaluate(el => {
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          return (
-            rect.width > 4 &&
-            rect.height > 4 &&
-            style.visibility !== "hidden" &&
-            style.display !== "none" &&
-            style.opacity !== "0"
-          );
-        }).catch(() => false);
-
-        if (!visible) continue;
-
-        try {
-          await handle.evaluate(el =>
-            el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
-          );
-
-          // Try real DOM click
-          await handle.click({ delay: 50 });
-          console.log("✅ Clicked close button (direct DOM click).");
-          return true;
-        } catch {
-          // Fallback: synthetic event (safe, non-blocking)
-          await page.evaluate(el => {
-            try {
-              const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
-              el.dispatchEvent(evt);
-            } catch {}
-          }, handle).catch(() => {});
-          console.log("✅ Fallback dispatched click event to close button.");
-          return true;
-        }
-      }
-
-      // Small wait before retrying to avoid tight loops
-      await new Promise(r => setTimeout(r, 200));
+    // Wait briefly for any close button to appear
+    const handle = await page.$(selector);
+    if (!handle) {
+      console.log("⚠️ No close button found (PlayStream/Taboola).");
+      return false;
     }
 
-    console.log("⚠️ No visible close button successfully clicked within timeout.");
-    return false;
+    // Ensure it’s scrolled into view before clicking
+    await handle.evaluate(el =>
+      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
+    );
+
+    // Try Chrome-level click first
+    try {
+      await handle.click({ delay: 40 });
+      console.log("✅ Directly clicked close button (DOM click).");
+      return true;
+    } catch (e) {
+      console.warn(`⚠️ DOM click failed: ${e.message}`);
+    }
+
+    // Fallback: dispatch synthetic click in DOM
+    await page.evaluate(el => {
+      const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
+      el.dispatchEvent(evt);
+    }, handle);
+    console.log("✅ Dispatched manual click event to close button.");
+    return true;
   } catch (err) {
-    console.error("❌ directClickAnyCloseButton failed:", err.message);
+    console.error("❌ Failed to click close button:", err.message);
     return false;
   }
 }

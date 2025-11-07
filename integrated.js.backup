@@ -203,110 +203,51 @@ async function clickElements(page, elements) {
 
 //ClickCloseButton
 /**
- * Click any "close" button visible in DOM, shadow roots, or iframes.
- * Resilient against detached frames, slow ads, and missing bounding boxes.
+ * Find any visible element that looks like a "close" button and click it with the mouse.
+ * Targets elements whose id, class, or aria-label include "close".
  */
-export async function clickVisualCloseButton(page) {
-  console.log("🔍 Searching for visual close buttons...");
-
-  // Short sleep helper
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-  async function safeClick(page, handle, context = "main") {
-    try {
-      const element = handle.asElement ? handle.asElement() : handle;
-      if (!element) throw new Error("Handle not an element");
-
-      const box = await element.boundingBox();
-      if (box) {
-        const x = box.x + box.width / 2;
-        const y = box.y + box.height / 2;
-        const mouse = page.mouse;
-        await mouse.move(x, y, { steps: 5 });
-        await sleep(40);
-        await mouse.down();
-        await sleep(60);
-        await mouse.up();
-        console.log(`✅ ${context}: Mouse click at (${x.toFixed(1)}, ${y.toFixed(1)}).`);
-        return true;
-      }
-
-      console.warn(`⚠️ ${context}: No bounding box, falling back to DOM click...`);
-      await element.click({ delay: 50 });
-      console.log(`✅ ${context}: ElementHandle.click() succeeded.`);
-      return true;
-    } catch (err) {
-      // Last resort — dispatch a DOM click manually
-      try {
-        await handle.evaluate(el => {
-          const ev = new MouseEvent("click", { bubbles: true, cancelable: true });
-          el.dispatchEvent(ev);
-        });
-        console.log(`✅ ${context}: Manual click dispatched.`);
-        return true;
-      } catch (inner) {
-        console.warn(`⚠️ ${context} click failed: ${inner.message}`);
-        return false;
-      }
-    }
-  }
-
-  // MAIN DOCUMENT
-  const candidates = await page.$$('[id*="close"], [class*="close"], [aria-label*="close"]');
-  for (const handle of candidates) {
-    try {
-      await handle.evaluate(el => el.scrollIntoView({ block: "center", inline: "center" }));
-      if (await safeClick(page, handle, "main")) return true;
-    } catch {}
-  }
-
-  // SHADOW ROOTS
+async function clickVisualCloseButton(page) {
   try {
-    const jsHandle = await page.evaluateHandle(() => {
-      const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
-      while (walker.nextNode()) {
-        const el = walker.currentNode;
-        if (el.shadowRoot) {
-          const btn = el.shadowRoot.querySelector('[id*="close"], [class*="close"], [aria-label*="close"]');
-          if (btn) return btn;
-        }
-      }
-      return null;
-    });
-    const shadowEl = jsHandle.asElement?.();
-    if (shadowEl && (await safeClick(page, shadowEl, "shadow-root"))) return true;
-  } catch (err) {
-    console.warn(`⚠️ Shadow-root check failed: ${err.message}`);
-  }
+    // Find the most relevant "close" element
+    const handle = await page.$(
+      '[id*="close"], [class*="close"], [aria-label*="close"]'
+    );
 
-  // IFRAMES — each capped to 3s
-  for (const frame of page.frames()) {
-    if (!frame || frame === page.mainFrame() || frame.isDetached?.()) continue;
-
-    try {
-      const result = await Promise.race([
-        (async () => {
-          const handle = await frame.$('[id*="close"], [class*="close"], [aria-label*="close"]');
-          if (handle) {
-            console.log(`🎯 Found close button inside frame: ${frame.url()}`);
-            await handle.evaluate(el => el.scrollIntoView({ block: "center", inline: "center" }));
-            return await safeClick(page, handle, "iframe");
-          }
-          return false;
-        })(),
-        sleep(3000).then(() => {
-          throw new Error("frame timeout");
-        })
-      ]);
-      if (result) return true;
-    } catch (err) {
-      if (!/cross-origin|detached/i.test(err.message))
-        console.warn(`⚠️ Frame ${frame.url()} skipped: ${err.message}`);
+    if (!handle) {
+      console.log("⚠️ No close button found.");
+      return false;
     }
-  }
 
-  console.log("⚠️ No clickable close button found anywhere.");
-  return false;
+    // Scroll it into view for accurate coordinates
+    await handle.evaluate(el =>
+      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
+    );
+
+    // Get the element’s bounding box
+    const box = await handle.boundingBox();
+    if (!box) {
+      console.log("⚠️ Element not visible (no bounding box).");
+      return false;
+    }
+
+    // Compute click coordinates (center point)
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+
+    // Perform a smooth mouse click
+    const mouse = page.mouse;
+    await mouse.move(x, y, { steps: 8 });
+    await page.waitForTimeout(40);
+    await mouse.down();
+    await page.waitForTimeout(60);
+    await mouse.up();
+
+    console.log(`✅ Clicked visual close button at (${x.toFixed(1)}, ${y.toFixed(1)}).`);
+    return true;
+  } catch (err) {
+    console.error("❌ Failed to click close button:", err.message);
+    return false;
+  }
 }
 
 
@@ -401,10 +342,8 @@ async function saveArchive(page, url) {
   
   
   await clickPopups(page);
-  //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
-
-
+  await clickVisualCloseButton(page);
+  
   const htmlPath = path.join(outdir, "page.html");
   const html = await page.content();
   fs.writeFileSync(htmlPath, html, "utf8");
@@ -412,8 +351,8 @@ async function saveArchive(page, url) {
 
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
-  //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
+  await clickVisualCloseButton(page);
+  
 
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -426,9 +365,8 @@ async function saveArchive(page, url) {
 
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
-  //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
-
+  await clickVisualCloseButton(page);
+  
 
   const pdfPath = path.join(outdir, "page.pdf");
   await page.pdf({ path: pdfPath, format: "A4", printBackground: true });
@@ -452,105 +390,6 @@ async function saveArchive(page, url) {
   console.log("🧾 Saved meta.json");
 }
 
-
-async function enableAdBlock(page) {
-  await page.setRequestInterception(true);
-  page.on('request', req => {
-    const url = req.url();
-    if (/taboola|doubleclick|adsystem|googlesyndication|playstream|outbrain/i.test(url))
-      return req.abort();
-    req.continue();
-  });
-}
-
-
-/**
- * Directly clicks any ad/video overlay close button (PlayStream, Taboola, etc.)
- * Resilient: handles detached nodes, hidden wrappers, and racey DOM states safely.
- */
-async function directClickAnyCloseButton(page) {
-  try {
-    const selector = [
-      // 🎯 PlayStream and video overlays
-      '[id^="ps-close-button"]',
-      '[class*="ps-close-button"]',
-      '[id^="ps-display-close-button"]',
-      '[class*="ps-display-close-button"]',
-
-      // 🎯 Taboola overlays
-      '.tbl-next-up-closeBtn',
-      '.tbl-next-up-closeBtn-wrapper',
-
-      // 🎯 Generic fallback
-      '[aria-label*="close" i]',
-      '[role="button"][class*="close" i]'
-    ].join(',');
-
-    // Race-safe timeout: don’t let this hang indefinitely
-    const timeout = 6000;
-    const start = Date.now();
-
-    // Wait at most 6s for any close button to appear
-    while (Date.now() - start < timeout) {
-      const handles = await page.$$(selector);
-      if (!handles.length) {
-        await page.evaluate(() => new Promise(r => setTimeout(r, 250)));
-        continue;
-      }
-
-      for (const handle of handles) {
-        const stillExists = await handle.evaluate(el => !!el.isConnected).catch(() => false);
-        if (!stillExists) continue;
-
-        const visible = await handle.evaluate(el => {
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          return (
-            rect.width > 4 &&
-            rect.height > 4 &&
-            style.visibility !== "hidden" &&
-            style.display !== "none" &&
-            style.opacity !== "0"
-          );
-        }).catch(() => false);
-
-        if (!visible) continue;
-
-        try {
-          await handle.evaluate(el =>
-            el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
-          );
-
-          // Try real DOM click
-          await handle.click({ delay: 50 });
-          console.log("✅ Clicked close button (direct DOM click).");
-          return true;
-        } catch {
-          // Fallback: synthetic event (safe, non-blocking)
-          await page.evaluate(el => {
-            try {
-              const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
-              el.dispatchEvent(evt);
-            } catch {}
-          }, handle).catch(() => {});
-          console.log("✅ Fallback dispatched click event to close button.");
-          return true;
-        }
-      }
-
-      // Small wait before retrying to avoid tight loops
-      await new Promise(r => setTimeout(r, 200));
-    }
-
-    console.log("⚠️ No visible close button successfully clicked within timeout.");
-    return false;
-  } catch (err) {
-    console.error("❌ directClickAnyCloseButton failed:", err.message);
-    return false;
-  }
-}
-
-
 /* -------------------------------------------------------------------------- */
 /*                              MAIN EXECUTION FLOW                            */
 /* -------------------------------------------------------------------------- */
@@ -572,9 +411,6 @@ async function runArchive(url) {
 
   try {
     const page = await browser.newPage();
-    //await enableAdBlock(page, { log: true });
-
-
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
 
@@ -583,6 +419,8 @@ async function runArchive(url) {
       "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     });
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+
+
 
 
     console.log(`🌐 Visiting: ${url}`);
@@ -600,7 +438,6 @@ async function runArchive(url) {
 
 	  
     await clickPopups(page);
-    await directClickAnyCloseButton(page);
 
     await saveArchive(page, url);
     console.log("✅ Archive done.");
