@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import puppeteer from "puppeteer";
+// Stealth-enabled Puppeteer
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+
+
+// Activate stealth before anything else
+puppeteer.use(StealthPlugin());
+
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -11,7 +18,7 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "reject", "decline", "no thanks"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later",  "reject", "decline", "no thanks", "I'll Give Later"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
 
@@ -193,6 +200,32 @@ async function clickElements(page, elements) {
   }
 }
 
+
+
+
+async function clickPopups(page) {
+  console.log("🔍 Checking for popups...");
+
+  const matches = await findAllMatchingElements(page, SEARCH_TERMS);
+  if (matches.length === 0) {
+    console.log("ℹ️ No clickable popups found.");
+    return;
+  }
+
+  console.log(`🧹 Found ${matches.length} clickable element(s):`);
+  for (const el of matches) {
+    const matched = SEARCH_TERMS.filter(t =>
+      el.text.toLowerCase().includes(t.toLowerCase())
+    );
+    console.log(`   → <${el.tag}> "${el.text}" [${matched.join(", ")}]`);
+  }
+
+  await clickElements(page, matches);
+  await sleep(1000);
+  console.log("✅ Popup click pass done.\n");
+}
+
+
 async function triggerLazyLoadScroll(page) {
   await page.evaluate(async () => {
     const totalHeight = document.body.scrollHeight;
@@ -256,24 +289,27 @@ async function saveArchive(page, url) {
   const outdir = path.join(ARCHIVE_BASE, archiveId);
   fs.mkdirSync(outdir, { recursive: true });
   console.log(`\n🗄️  Starting archive save in: ${outdir}`);
-
+  
+  
+  await clickPopups(page);
   const htmlPath = path.join(outdir, "page.html");
   const html = await page.content();
   fs.writeFileSync(htmlPath, html, "utf8");
   console.log(`✅ Saved HTML: ${htmlPath}`);
 
   await triggerLazyLoadScroll(page);
-
+  await clickPopups(page);
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
 
-  try {
-    await page.waitForNetworkIdle({ idleTime: 500, timeout: 10000 });
-  } catch {}
-  await sleep(400);
-  await triggerLazyLoadScroll(page);
+  //try {
+    //await page.waitForNetworkIdle({ idleTime: 500, timeout: 10000 });
+  //} catch {}
+  //await sleep(400);
 
+  await triggerLazyLoadScroll(page);
+  await clickPopups(page);
   const pdfPath = path.join(outdir, "page.pdf");
   await page.pdf({ path: pdfPath, format: "A4", printBackground: true });
   console.log(`✅ Saved PDF: ${pdfPath}`);
@@ -303,6 +339,7 @@ async function saveArchive(page, url) {
 async function runArchive(url) {
   const browser = await puppeteer.launch({
     headless: "new",
+    ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -318,12 +355,19 @@ async function runArchive(url) {
     const page = await browser.newPage();
     console.log(`🌐 Visiting: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
+    
+    //Experiment
+    await sleep(2000);
 
-    const matches = await findAllMatchingElements(page, SEARCH_TERMS);
-    if (matches.length > 0) {
-      await clickElements(page, matches);
-      await sleep(2000);
-    }
+
+    //const matches = await findAllMatchingElements(page, SEARCH_TERMS);
+    //if (matches.length > 0) {
+      //await clickElements(page, matches);
+      //await sleep(2000);
+    //}
+
+    await clickPopups(page);
+
     await saveArchive(page, url);
     console.log("✅ Archive done.");
     return true;
