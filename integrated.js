@@ -465,13 +465,13 @@ async function enableAdBlock(page) {
 
 
 /**
- * Directly clicks any ad/video overlay close button (PlayStream, Taboola, etc.)
- * Resilient: handles detached nodes, hidden wrappers, and racey DOM states safely.
+ * Directly clicks any ad/video overlay close button (PlayStream, Taboola, Google Ads, etc.)
+ * Fully resilient: handles detached nodes, dynamic overlays, and racey DOM updates.
  */
 async function directClickAnyCloseButton(page) {
   try {
     const selector = [
-      // 🎯 PlayStream and video overlays
+      // 🎯 PlayStream and in-video overlays
       '[id^="ps-close-button"]',
       '[class*="ps-close-button"]',
       '[id^="ps-display-close-button"]',
@@ -481,16 +481,18 @@ async function directClickAnyCloseButton(page) {
       '.tbl-next-up-closeBtn',
       '.tbl-next-up-closeBtn-wrapper',
 
+      // 🎯 Google / DoubleClick / AdSense overlays
+      'div[style*="position: absolute"][style*="border-radius"][style*="cursor: pointer"] svg path[d*="L38 12.83"]', // typical close X path
+      'div[style*="cursor: pointer"][style*="background-color"][style*="z-index"][id^="Ne"][id*="_"]',
+
       // 🎯 Generic fallback
       '[aria-label*="close" i]',
       '[role="button"][class*="close" i]'
     ].join(',');
 
-    // Race-safe timeout: don’t let this hang indefinitely
     const timeout = 6000;
     const start = Date.now();
 
-    // Wait at most 6s for any close button to appear
     while (Date.now() - start < timeout) {
       const handles = await page.$$(selector);
       if (!handles.length) {
@@ -521,28 +523,27 @@ async function directClickAnyCloseButton(page) {
             el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
           );
 
-          // Try real DOM click
-          await handle.click({ delay: 50 });
-          console.log("✅ Clicked close button (direct DOM click).");
+          // Try DOM click first
+          await handle.click({ delay: 40 });
+          console.log("✅ Clicked ad/overlay close button directly.");
           return true;
         } catch {
-          // Fallback: synthetic event (safe, non-blocking)
+          // Fallback: synthetic event dispatch
           await page.evaluate(el => {
             try {
               const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
               el.dispatchEvent(evt);
             } catch {}
           }, handle).catch(() => {});
-          console.log("✅ Fallback dispatched click event to close button.");
+          console.log("✅ Fallback dispatched manual click event to close button.");
           return true;
         }
       }
 
-      // Small wait before retrying to avoid tight loops
       await new Promise(r => setTimeout(r, 200));
     }
 
-    console.log("⚠️ No visible close button successfully clicked within timeout.");
+    console.log("⚠️ No visible close button clicked within timeout.");
     return false;
   } catch (err) {
     console.error("❌ directClickAnyCloseButton failed:", err.message);
