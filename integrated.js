@@ -18,7 +18,7 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later",  "reject", "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later",  "decline", "no thanks", "I'll Give Later"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
 
@@ -430,7 +430,20 @@ async function saveArchive(page, url) {
   await directClickAnyCloseButton(page);
 
 
+
+
+
   const pdfPath = path.join(outdir, "page.pdf");
+  
+  await page.addStyleTag({
+  content: `
+    header, nav, [class*="header"], [class*="sticky"], [id*="header"], [class*="top-bar"], [class*="menu-bar"] {
+      display: none !important;
+      visibility: hidden !important;
+    }
+  `
+  });
+
   await page.pdf({ path: pdfPath, format: "A4", printBackground: true });
   console.log(`✅ Saved PDF: ${pdfPath}`);
 
