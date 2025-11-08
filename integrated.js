@@ -18,7 +18,7 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later",  "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "Reject",  "decline", "no thanks", "I'll Give Later"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
 
@@ -192,6 +192,26 @@ async function simulateMouseClick(page, x, y) {
 async function clickElements(page, elements) {
   for (const el of elements) {
     try {
+      // Skip long anchor text or likely article links
+      if (el.tag === "a") {
+        const textLen = el.text.length;
+        if (textLen > 15) {
+          console.log(`⏭️ Skipping long <a> (${textLen} chars): "${el.text.slice(0, 40)}..."`);
+          continue;
+        }
+
+        // Optional: skip anchors that point to external domains
+        const href = await page.evaluate((x, y) => {
+          const node = document.elementFromPoint(x, y);
+          return node?.closest("a")?.href || "";
+        }, el.x, el.y);
+
+        if (href && !href.startsWith(window.location.origin)) {
+          console.log(`⏭️ Skipping external link: ${href}`);
+          continue;
+        }
+      }
+
       console.log(`🖱️ Clicking <${el.tag}> "${el.text}"`);
       await simulateMouseClick(page, el.x, el.y);
     } catch (err) {
