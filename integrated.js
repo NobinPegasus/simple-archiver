@@ -412,6 +412,34 @@ function makeArchiveId(url, title) {
   return `${slug}_${urlHash}`;
 }
 
+
+
+async function hideStickyFooters(page) {
+  await page.evaluate(() => {
+    const style = document.createElement('style');
+    style.id = '__hide_footer_style';
+    style.textContent = `
+      footer,
+      [class*="ftr-stk"],
+      [class*="footer"],
+      [id*="footer"],
+      [class*="FtrWdg"] {
+        display: none !important;
+        visibility: hidden !important;
+      }
+    `;
+    document.head.appendChild(style);
+  });
+}
+
+async function restoreStickyFooters(page) {
+  await page.evaluate(() => {
+    const style = document.getElementById('__hide_footer_style');
+    if (style) style.remove();
+  });
+}
+
+
 async function saveArchive(page, url) {
   const title = slugFromUrl(url);
   const archiveId = makeArchiveId(url, title);
@@ -435,6 +463,8 @@ async function saveArchive(page, url) {
   //await clickVisualCloseButton(page);
   await directClickAnyCloseButton(page);
 
+  
+  await hideStickyFooters(page);
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
