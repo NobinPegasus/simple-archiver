@@ -413,6 +413,30 @@ function makeArchiveId(url, title) {
 }
 
 
+/**
+ * Remove or hide intrusive third-party widgets (e.g. JioSaavn)
+ * Used right before screenshot or PDF capture to keep archives clean.
+ */
+async function removeJioSaavnWidget(page) {
+  try {
+    await page.evaluate(() => {
+      const selectors = [
+        '#jiosaavn-widget',
+        '[id*="jiosaavn"]',
+        'iframe[src*="jiosaavn.com"]'
+      ];
+      for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach(el => {
+          el.remove(); // physically remove from DOM
+        });
+      }
+    });
+    console.log('🧹 Removed JioSaavn widget successfully.');
+  } catch (err) {
+    console.warn('⚠️ Failed to remove JioSaavn widget:', err.message);
+  }
+}
+
 
 async function hideStickyFooters(page) {
   await page.evaluate(() => {
@@ -665,6 +689,7 @@ async function runArchive(url) {
 	  
     await clickPopups(page);
     await directClickAnyCloseButton(page);
+    await removeJioSaavnWidget(page);
 
     await saveArchive(page, url);
     console.log("✅ Archive done.");
