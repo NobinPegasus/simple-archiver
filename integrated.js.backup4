@@ -603,94 +603,53 @@ async function restoreStickyFooters(page) {
 }
 
 async function removeIzootoBranding(page) {
-  try {
-    const removedCount = await page.evaluate(() => {
+  await page.evaluate(() => {
+    try {
+      // Remove the known iZooto branding container and similar widgets
       const selectors = [
         '.iz-branding',
-        '.iz-text',
-        '.iz-brand',
         '[class*="izooto"]',
         '[id*="izooto"]',
         '[data-izooto]',
-        'a[href*="izooto.com"]',
-        'iframe[src*="izooto.com"]',
       ];
 
-      let removed = 0;
-
-      // Remove directly matched elements
       selectors.forEach(sel => {
-        document.querySelectorAll(sel).forEach(el => {
-          el.remove();
-          removed++;
-        });
+        document.querySelectorAll(sel).forEach(el => el.remove());
       });
 
-      // Remove any container that says “Powered by iZooto” or “Notifications Powered by”
-      document.querySelectorAll('body div, body span, body section').forEach(el => {
+      // Defensive cleanup: remove any "Powered by iZooto" text nodes
+      document.querySelectorAll('body *').forEach(el => {
         const text = (el.textContent || '').toLowerCase();
         if (text.includes('powered by') && text.includes('izooto')) {
           el.remove();
-          removed++;
         }
       });
 
-      return removed;
-    });
-
-    console.log(`🧹 Removed ${removedCount} iZooto branding element(s).`);
-  } catch (err) {
-    console.warn('⚠️ Failed to remove iZooto branding:', err.message);
-  }
+      // Prevent re-injection: add a style rule hiding future branding inserts
+      let style = document.getElementById('__hide_izooto_style');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = '__hide_izooto_style';
+        style.textContent = `
+          .iz-branding,
+          [class*="izooto"],
+          [id*="izooto"],
+          [data-izooto],
+          a[href*="izooto.com"],
+          span.iz-brand {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            overflow: hidden !important;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+    } catch (err) {
+      console.warn('⚠️ Failed to remove iZooto branding:', err.message);
+    }
+  });
 }
-
-
-/**
- * removeFloatingExplainers(page)
- * ----------------------------------------------------------
- * Removes floating bottom "Explainer" promo boxes or
- * similar fixed-position story suggestion widgets.
- *
- * Usage:
- *    await removeFloatingExplainers(page);
- */
-async function removeFloatingExplainers(page) {
-  try {
-    const removedCount = await page.evaluate(() => {
-      const selectors = [
-        // Generic fixed-position promos
-        'div[class*="fixed"][class*="bottom"]',
-        // Specific patterns observed in TheDailyJagran, etc.
-        'div[class*="animate-slide-up"]',
-        'div[aria-label*="popup" i]',
-      ];
-
-      let removed = 0;
-      document.querySelectorAll(selectors.join(',')).forEach(el => {
-        const text = (el.textContent || '').toLowerCase();
-        const hasExplainer =
-          text.includes('explainer');
-
-        const hasFixed = getComputedStyle(el).position === 'fixed';
-        const hasZIndex = parseInt(getComputedStyle(el).zIndex || '0', 10) >= 30;
-
-        // Only remove likely overlays/promos
-        if (hasExplainer || (hasFixed && hasZIndex)) {
-          el.remove();
-          removed++;
-        }
-      });
-
-      return removed;
-    });
-
-    console.log(`🧹 Removed ${removedCount} floating Explainer/promo box(es).`);
-  } catch (err) {
-    console.warn('⚠️ Failed to remove floating explainers:', err.message);
-  }
-}
-
-
 
 async function saveArchive(page, url) {
   const title = slugFromUrl(url);
@@ -796,8 +755,6 @@ async function saveArchive(page, url) {
 
 	await hideStickyFooters(page);
 	await removeIzootoBranding(page);
-	await removeFloatingExplainers(page);
-
 	await sleep(300);
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
