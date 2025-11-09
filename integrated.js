@@ -642,7 +642,15 @@ async function directClickAnyCloseButton(page) {
 
       // 🎯 Generic fallback
       '[aria-label*="close" i]',
-      '[role="button"][class*="close" i]'
+      '[role="button"][class*="close" i]',
+      
+      // 🎯 Picture-in-picture & generic dismiss buttons
+      '#close-pip',
+      'button#close-pip',
+      'button.pip_close',
+      'button.close-btn',
+      'button[class*="close" i]',   
+
     ].join(',');
 
     const timeout = 6000;
