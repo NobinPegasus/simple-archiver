@@ -18,7 +18,7 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "Reject",  "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "Reject", "Read more",  "decline", "no thanks", "I'll Give Later"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
 
@@ -213,7 +213,17 @@ async function clickElements(page, elements) {
       }
 
       console.log(`🖱️ Clicking <${el.tag}> "${el.text}"`);
-      await simulateMouseClick(page, el.x, el.y);
+      //await simulateMouseClick(page, el.x, el.y);
+      await page.evaluate((text) => {
+	  const btns = [...document.querySelectorAll('button, a, input')];
+	  const target = btns.find(b => (b.innerText || b.value || '').trim().toLowerCase().includes(text.toLowerCase()));
+	  if (target) {
+	    target.scrollIntoView({ block: 'center', behavior: 'instant' });
+	    target.click();
+	  }
+	}, el.text);
+	await sleep(1000);
+
     } catch (err) {
       console.warn(`⚠️ Failed to click "${el.text}": ${err.message}`);
     }
@@ -496,23 +506,65 @@ async function removeAdWrappers(page) {
 }
 
 
+
 async function hideStickyFooters(page) {
   await page.evaluate(() => {
-    const style = document.createElement('style');
-    style.id = '__hide_footer_style';
+    // Remove the known bottom sticky navigation bar completely
+    document.querySelectorAll('.m-mb, .m-bm, .bottom_sticky_nav').forEach(el => {
+      if (
+        el.classList.contains('m-mb') ||
+        el.classList.contains('m-bm') ||
+        el.classList.contains('bottom_sticky_nav')
+      ) {
+        el.remove();
+      }
+    });
+
+    // Inject or update footer/bottom nav hide style (keeps original functionality)
+    let style = document.getElementById('__hide_footer_style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = '__hide_footer_style';
+      document.head.appendChild(style);
+    }
+
     style.textContent = `
+      /* Original footer hiding logic */
       footer,
       [class*="ftr-stk"],
       [class*="footer"],
       [id*="footer"],
-      [class*="FtrWdg"] {
+      [class*="FtrWdg"],
+      /* Extended: hide mobile bottom nav and sticky bars */
+      [class*="bottom-nav"],
+      [class*="mobile-bottom-bar"],
+      [class*="bottom-navbar"],
+      [id*="bottomBar"],
+      .bottom_sticky_nav,
+      .m-mb,
+      .m-bm {
         display: none !important;
         visibility: hidden !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+      }
+
+      /* Clean up body margins so content extends fully */
+      html, body {
+        margin-bottom: 0 !important;
+        padding-bottom: 0 !important;
+      }
+
+      main, article, section {
+        margin-bottom: 0 !important;
+        padding-bottom: 0 !important;
       }
     `;
-    document.head.appendChild(style);
   });
 }
+
 
 async function restoreStickyFooters(page) {
   await page.evaluate(() => {
@@ -544,9 +596,12 @@ async function saveArchive(page, url) {
   await clickPopups(page);
   //await clickVisualCloseButton(page);
   await directClickAnyCloseButton(page);
+  await page.setBypassCSP(true);
+  await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
 
   
   await hideStickyFooters(page);
+  await sleep(300);
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
@@ -558,25 +613,71 @@ async function saveArchive(page, url) {
 
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
-  //await clickVisualCloseButton(page);
+  await clickVisualCloseButton(page);
   await directClickAnyCloseButton(page);
   await removeBackToTopButton(page);
   await removeAdWrappers(page);
-
+  await sleep(300);
 
 
   const pdfPath = path.join(outdir, "page.pdf");
-  
-  await page.addStyleTag({
-  content: `
-    header, nav, [class*="header"], [class*="sticky"], [id*="header"], [class*="top-bar"], [class*="menu-bar"] {
-      display: none !important;
-      visibility: hidden !important;
-    }
-  `
-  });
-	
 
+	// Wait for layout to stabilize before PDF
+	await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
+
+	// Inject CSS directly into main document (skip frames)
+	await page.evaluate(() => {
+	  try {
+	    let style = document.getElementById('__hide_headers_style');
+	    if (!style) {
+	      style = document.createElement('style');
+	      style.id = '__hide_headers_style';
+	      document.head.appendChild(style);
+	    }
+
+	    style.textContent = `
+	      /* Hide sticky headers and navbars safely */
+	      header,
+	      nav,
+	      [class*="header"],
+	      [class*="top-bar"],
+	      [class*="menu-bar"] {
+		display: none !important;
+		visibility: hidden !important;
+		height: 0 !important;
+		overflow: hidden !important;
+	      }
+
+	      /* Ensure full-page layout for PDF */
+	      html, body {
+		min-height: 100% !important;
+		height: auto !important;
+		overflow: visible !important;
+	      }
+
+	      /* Expand main content without overflow */
+	      main, article, section {
+		height: auto !important;
+		min-height: auto !important;
+		overflow: visible !important;
+		transform: none !important;
+	      }
+
+	      /* Neutralize fixed-position or overflow-hidden containers */
+	      [style*="position: fixed"],
+	      [style*="overflow:hidden"] {
+		position: static !important;
+		overflow: visible !important;
+	      }
+	    `;
+	  } catch (err) {
+	    console.warn("⚠️ Failed to inject header-hide styles:", err.message);
+	  }
+	});
+
+
+	await hideStickyFooters(page);
+	await sleep(300);
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
 	await page.pdf({
@@ -723,6 +824,7 @@ async function runArchive(url) {
   const browser = await puppeteer.launch({
     headless: "new",
     ignoreDefaultArgs: ["--enable-automation"],
+    protocolTimeout: 180000,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -750,6 +852,7 @@ async function runArchive(url) {
 
 
     console.log(`🌐 Visiting: ${url}`);
+    await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
     
     //Experiment
