@@ -414,6 +414,31 @@ function makeArchiveId(url, title) {
 
 
 /**
+ * Remove floating "Back to Top" buttons or related UI widgets.
+ * These are purely navigational and irrelevant for archival.
+ */
+async function removeBackToTopButton(page) {
+  try {
+    await page.evaluate(() => {
+      const selectors = [
+        '.back-to-top',
+        '[class*="backtotop"]',
+        '[id*="backtotop"]',
+        '.js-back-to-top',
+        '.js-bkt-out'
+      ];
+      for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach(el => el.remove());
+      }
+    });
+    console.log('🧹 Removed back-to-top button successfully.');
+  } catch (err) {
+    console.warn('⚠️ Failed to remove back-to-top button:', err.message);
+  }
+}
+
+
+/**
  * Remove or hide intrusive third-party widgets (e.g. JioSaavn)
  * Used right before screenshot or PDF capture to keep archives clean.
  */
@@ -434,6 +459,39 @@ async function removeJioSaavnWidget(page) {
     console.log('🧹 Removed JioSaavn widget successfully.');
   } catch (err) {
     console.warn('⚠️ Failed to remove JioSaavn widget:', err.message);
+  }
+}
+
+
+/**
+ * removeAdWrappers(page)
+ * ----------------------------------------------------------
+ * Removes common advertisement wrapper containers from the page DOM.
+ * Specifically targets elements with classes like 'ads-wrp' or similar.
+ * 
+ * Usage:
+ *    await removeAdWrappers(page);
+ */
+async function removeAdWrappers(page) {
+  try {
+    const removedCount = await page.evaluate(() => {
+      const selectors = [
+        'div.ads-wrp',           // direct ad wrappers
+        'div[class*="ads-wrp"]', // partial matches
+        'div[id*="ad-"]',        // generic ad IDs
+        'div[class*="adbox"]',   // embedded ad boxes
+        'div[class*="sponsor"]', // sponsored content blocks
+        'div.LsWg_wr.LsWg_wr-pd'
+      ];
+
+      const matches = document.querySelectorAll(selectors.join(','));
+      matches.forEach(el => el.remove());
+      return matches.length; // return count to Node
+    });
+
+    console.log(`🧹 Removed[Ad] ${removedCount} advertisement container(s).`);
+  } catch (err) {
+    console.warn('⚠️ Failed to remove advertisement wrappers:', err.message);
   }
 }
 
@@ -502,8 +560,8 @@ async function saveArchive(page, url) {
   await clickPopups(page);
   //await clickVisualCloseButton(page);
   await directClickAnyCloseButton(page);
-
-
+  await removeBackToTopButton(page);
+  await removeAdWrappers(page);
 
 
 
@@ -517,10 +575,20 @@ async function saveArchive(page, url) {
     }
   `
   });
+	
 
-  await page.pdf({ path: pdfPath, format: "A4", printBackground: true });
+	await page.setViewport({ width: 1440, height: 900 });
+	await page.emulateMediaType('screen');
+	await page.pdf({
+	  path: pdfPath,
+	  format: 'A4',
+	  margin: {bottom: "8px"},
+	  printBackground: true,
+	  scale: 1
+	});
+
+
   console.log(`✅ Saved PDF: ${pdfPath}`);
-
   const metrics = await page.evaluate(() => ({
     title: document.title,
     width: document.documentElement.scrollWidth,
