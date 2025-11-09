@@ -573,6 +573,54 @@ async function restoreStickyFooters(page) {
   });
 }
 
+async function removeIzootoBranding(page) {
+  await page.evaluate(() => {
+    try {
+      // Remove the known iZooto branding container and similar widgets
+      const selectors = [
+        '.iz-branding',
+        '[class*="izooto"]',
+        '[id*="izooto"]',
+        '[data-izooto]',
+      ];
+
+      selectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => el.remove());
+      });
+
+      // Defensive cleanup: remove any "Powered by iZooto" text nodes
+      document.querySelectorAll('body *').forEach(el => {
+        const text = (el.textContent || '').toLowerCase();
+        if (text.includes('powered by') && text.includes('izooto')) {
+          el.remove();
+        }
+      });
+
+      // Prevent re-injection: add a style rule hiding future branding inserts
+      let style = document.getElementById('__hide_izooto_style');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = '__hide_izooto_style';
+        style.textContent = `
+          .iz-branding,
+          [class*="izooto"],
+          [id*="izooto"],
+          [data-izooto],
+          a[href*="izooto.com"],
+          span.iz-brand {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            overflow: hidden !important;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+    } catch (err) {
+      console.warn('⚠️ Failed to remove iZooto branding:', err.message);
+    }
+  });
+}
 
 async function saveArchive(page, url) {
   const title = slugFromUrl(url);
@@ -677,6 +725,7 @@ async function saveArchive(page, url) {
 
 
 	await hideStickyFooters(page);
+	await removeIzootoBranding(page);
 	await sleep(300);
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
