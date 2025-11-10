@@ -806,7 +806,7 @@ async function saveArchive(page, url) {
 	  format: 'A4',
 	  margin: {bottom: "8px"},
 	  printBackground: true,
-	  scale: 1
+	  scale: 0.98
 	});
 
 
@@ -868,7 +868,7 @@ async function directClickAnyCloseButton(page) {
       // 🎯 Generic fallback
       '[aria-label*="close" i]',
       '[role="button"][class*="close" i]',
-      
+      'button.ICt_m', 
       // 🎯 Picture-in-picture & generic dismiss buttons
       '#close-pip',
       'button#close-pip',
