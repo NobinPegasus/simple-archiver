@@ -18,7 +18,8 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "ok", "Reject", "Read more",  "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
+const EXPAND_TERMS = ["Show Full Article", "Read More", "View Full Story", "Expand", "Continue Reading"];
 const BLACKLIST_TERMS = ["Watch later", "facebook", "print ad", "bookmark", "sign in", "login"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
@@ -536,6 +537,109 @@ async function removeAdWrappers(page) {
 
 
 
+/**
+ * Clicks the first expandable content trigger ("Show Full Article", "Read More", etc.)
+ * Uses direct DOM click (not mouse coords). Works well with React/MUI.
+ * Verifies expansion by aria-expanded, panel visibility, or paragraph count.
+ */
+async function clickExpandableContent(page) {
+  const EXPAND_TERMS = [
+    "show full article",
+    "read more",
+    "view full story",
+    "continue reading",
+    "show more",
+    "expand"
+  ];
+
+  console.log("🔍 Searching for expandable content triggers...");
+
+  const clicked = await page.evaluate((terms) => {
+    const sel = "button, a, [role='button'], span[role='button']";
+    const all = Array.from(document.querySelectorAll(sel));
+    const lower = (s) => (s || "").toLowerCase();
+    const isVisible = (el) => {
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return (
+        r.width > 4 &&
+        r.height > 4 &&
+        cs.display !== "none" &&
+        cs.visibility !== "hidden" &&
+        cs.opacity !== "0"
+      );
+    };
+
+    const btn = all.find((el) => {
+      const text = (el.innerText || el.textContent || "").trim();
+      if (!text || text.length > 50) return false;
+      const t = lower(text);
+      return terms.some((term) => t.includes(lower(term))) && isVisible(el);
+    });
+
+    if (!btn) return false;
+
+    btn.scrollIntoView({ block: "center", behavior: "instant" });
+
+    // Dispatch full pointer/mouse event chain to simulate real user click
+    const ev = (type) =>
+      btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    try {
+      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(ev);
+    } catch {
+      btn.click();
+    }
+    return (btn.innerText || btn.textContent || "").trim();
+  }, EXPAND_TERMS);
+
+  if (!clicked) {
+    console.log("ℹ️ No expandable content triggers found.");
+    return;
+  }
+
+  console.log(`🖱️ Programmatically clicked expandable trigger: "${clicked}"`);
+  await sleep(800);
+
+  // Validate that content expanded
+  const expanded = await page.evaluate((terms) => {
+    const lower = (s) => (s || "").toLowerCase();
+    const btnSel = "button, a, [role='button'], span[role='button']";
+    const btn = Array.from(document.querySelectorAll(btnSel)).find((el) =>
+      terms.some((t) => lower((el.innerText || el.textContent || "")).includes(lower(t)))
+    );
+
+    if (btn && btn.getAttribute("aria-expanded") === "true") return true;
+
+    if (btn && btn.getAttribute("aria-controls")) {
+      const panel = document.getElementById(btn.getAttribute("aria-controls"));
+      if (panel) {
+        const cs = getComputedStyle(panel);
+        const rect = panel.getBoundingClientRect();
+        if (
+          cs.display !== "none" &&
+          cs.visibility !== "hidden" &&
+          rect.height > 5 &&
+          cs.opacity !== "0"
+        ) return true;
+      }
+    }
+
+    // fallback: paragraph count increase
+    const art = document.querySelector("article, main") || document.body;
+    const p = art.querySelectorAll("p");
+    if (!window.__pCount) window.__pCount = p.length;
+    return p.length > window.__pCount;
+  }, EXPAND_TERMS);
+
+  if (expanded) {
+    console.log("✅ Content expanded successfully.");
+  } else {
+    console.log("⚠️ Expansion not detected. Continuing...");
+  }
+}
+
+
+
 async function hideStickyFooters(page) {
   await page.evaluate(() => {
     // Remove the known bottom sticky navigation bar completely
@@ -992,6 +1096,7 @@ async function runArchive(url) {
 	  
     await clickPopups(page);
     await directClickAnyCloseButton(page);
+    await clickExpandableContent(page);
     await removeJioSaavnWidget(page);
 
     await saveArchive(page, url);
