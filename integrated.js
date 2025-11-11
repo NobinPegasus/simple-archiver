@@ -888,9 +888,20 @@ if (!/id=["']__injected_nav_blocker_fe__["']/.test(html)) {
   await page.setBypassCSP(true);
   await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
 
+  await clickExpandableContent(page); 
   
   await hideStickyFooters(page);
   await sleep(300);
+
+// 🧭 ensure scroll, animations, and network quiet before screenshot
+await page.evaluate(() => new Promise(resolve => {
+  window.scrollTo(0, 0);
+  requestAnimationFrame(() => {
+    setTimeout(resolve, 1200); // small buffer for sticky/animation settle
+  });
+}));
+await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
+
   const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
@@ -914,55 +925,65 @@ if (!/id=["']__injected_nav_blocker_fe__["']/.test(html)) {
 	// Wait for layout to stabilize before PDF
 	await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
 
-	// Inject CSS directly into main document (skip frames)
-	await page.evaluate(() => {
-	  try {
-	    let style = document.getElementById('__hide_headers_style');
-	    if (!style) {
-	      style = document.createElement('style');
-	      style.id = '__hide_headers_style';
-	      document.head.appendChild(style);
-	    }
 
-	    style.textContent = `
-	      /* Hide sticky headers and navbars safely */
-	      header,
-	      nav,
-	      [class*="header"],
-	      [class*="top-bar"],
-	      [class*="menu-bar"] {
-		display: none !important;
-		visibility: hidden !important;
-		height: 0 !important;
-		overflow: hidden !important;
-	      }
 
-	      /* Ensure full-page layout for PDF */
-	      html, body {
-		min-height: 100% !important;
-		height: auto !important;
-		overflow: visible !important;
-	      }
+await page.evaluate(() => {
+  try {
+    let style = document.getElementById('__hide_headers_style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = '__hide_headers_style';
+      document.head.appendChild(style);
+    }
 
-	      /* Expand main content without overflow */
-	      main, article, section {
-		height: auto !important;
-		min-height: auto !important;
-		overflow: visible !important;
-		transform: none !important;
-	      }
+    style.textContent = `
+      /* Hide sticky headers, navbars, and floating menus */
+      header,
+      nav,
+      [class*="header"],
+      [class*="top-bar"],
+      [class*="menu-bar"],
+      [class*="headMenu"],
+      [class*="fixedNav"],
+      [class*="leftFixedNav"],
+      [class*="leftSecNav"],
+      [class*="moreNav"],
+      [id*="sticky"],
+      [id*="header"],
+      [id*="navbar"],
+      [style*="position:fixed"],
+      [style*="position: sticky"] {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        position: static !important;
+      }
 
-	      /* Neutralize fixed-position or overflow-hidden containers */
-	      [style*="position: fixed"],
-	      [style*="overflow:hidden"] {
-		position: static !important;
-		overflow: visible !important;
-	      }
-	    `;
-	  } catch (err) {
-	    console.warn("⚠️ Failed to inject header-hide styles:", err.message);
-	  }
-	});
+      /* Restore normal flow */
+      html, body {
+        height: auto !important;
+        overflow: visible !important;
+      }
+
+      main, article, section {
+        height: auto !important;
+        overflow: visible !important;
+        transform: none !important;
+      }
+
+      /* Force content containers to unclip */
+      [style*="overflow:hidden"],
+      [style*="overflow: clip"] {
+        overflow: visible !important;
+      }
+    `;
+  } catch (err) {
+    console.warn("⚠️ Failed to inject header-hide styles:", err.message);
+  }
+});
+
 
 
 	await hideStickyFooters(page);
