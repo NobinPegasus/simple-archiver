@@ -18,11 +18,12 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
-const EXPAND_TERMS = ["Show Full Article", "Read More", "View Full Story", "Expand", "Continue Reading"];
+const SEARCH_TERMS = ["cancel", "close", "dismiss", "Don't Allow", "don't allow", "dont allow", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
+const EXPAND_TERMS = ["Show Full Article",  "View Full Story", "Expand", "Continue Reading"];
 const BLACKLIST_TERMS = ["Watch later", "facebook", "print ad", "bookmark", "sign in", "login"];
 const CLICK_DELAY_MS = 100;
 const ARCHIVE_BASE = "./archives";
+
 
 /* -------------------------------------------------------------------------- */
 /*                                   HELPERS                                  */
@@ -159,7 +160,14 @@ async function findMatchingClickableElements(frame, searchTerms) {
         const text = (el.textContent || el.value || "").trim();
         if (!text) continue;
 
-        const txt = text.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+	const normalize = s => s
+	  .toLowerCase()
+	  .replace(/[’‘']/g, "'") // unify smart quotes
+	  .replace(/[^\w\s']/g, " ") // keep words & apostrophes
+	  .trim();
+
+	const txt = normalize(text);
+
 
         const matched = terms.some(term => {
           const t = term.toLowerCase().trim();
@@ -545,8 +553,9 @@ async function removeAdWrappers(page) {
 async function clickExpandableContent(page) {
   const EXPAND_TERMS = [
     "show full article",
-    "read more",
     "view full story",
+    "Load More",
+    "Don't Allow",
     "continue reading",
     "show more",
     "expand"
@@ -808,11 +817,69 @@ async function saveArchive(page, url) {
   //await clickVisualCloseButton(page);
   await directClickAnyCloseButton(page);
 
-
   const htmlPath = path.join(outdir, "page.html");
-  const html = await page.content();
+  
+
+// --- inject a literal <script> into the saved HTML so archived file contains it ---
+const injectionId = "__injected_nav_blocker_fe__";
+const injectionScript = `<script id="${injectionId}">
+  try {
+    if (window.navigation) {
+      try {
+        window.navigation.onnavigate = e => {
+          if (e.sourceElement) return;
+          e.preventDefault();
+        };
+      } catch (err) {
+        try {
+          window.navigation.addEventListener?.('navigate', ev => {
+            if (ev.sourceElement) return;
+            ev.preventDefault();
+          });
+        } catch (__) {}
+      }
+    }
+  } catch (ignore) {}
+</script>`;
+
+
+
+
+
+
+
+  let html = await page.content();
+
+	// --- 🧩 Remove Financial Express redirect scripts ---
+	//html = html.replace(
+	  ///<script[^>]*>[\s\S]*?(arewehome|financialexpress\.com)[\s\S]*?<\/script>/gi,
+	  //"<!-- 🧩 removed FE redirect script -->"
+	//);
+
+	// --- Optional: remove any meta refresh redirects ---
+	//html = html.replace(
+	  ///<meta[^>]*http-equiv=["']refresh["'][^>]*>/gi,
+	  //"<!-- 🧩 removed meta-refresh -->"
+	//);
+
+// don't inject twice
+if (!/id=["']__injected_nav_blocker_fe__["']/.test(html)) {
+  if (/<head[\s>]/i.test(html)) {
+    // inject right after opening <head>
+    html = html.replace(/<head([\s>])/i, (m, g1) => `<head${g1}\n${injectionScript}\n`);
+  } else if (/<html[\s>]/i.test(html)) {
+    // no head but has html: insert a head block after <html>
+    html = html.replace(/<html([\s>])/i, (m, g1) => `<html${g1}\n<head>\n${injectionScript}\n</head>\n`);
+  } else {
+    // fallback: prepend to the file
+    html = injectionScript + "\n" + html;
+  }
+}
+
+
   fs.writeFileSync(htmlPath, html, "utf8");
-  console.log(`✅ Saved HTML: ${htmlPath}`);
+  console.log(`✅ Saved HTML without FE redirect logic: ${htmlPath}`);
+
 
   await triggerLazyLoadScroll(page);
   await clickPopups(page);
@@ -1050,7 +1117,7 @@ async function directClickAnyCloseButton(page) {
 
 async function runArchive(url) {
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: "None",
     ignoreDefaultArgs: ["--enable-automation"],
     protocolTimeout: 180000,
     args: [
@@ -1066,11 +1133,7 @@ async function runArchive(url) {
 
   try {
     const page = await browser.newPage();
-    //await enableAdBlock(page, { log: true });
-
-
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-
 
     await page.setExtraHTTPHeaders({
       "accept-language": "en-US,en;q=0.9",
@@ -1079,10 +1142,11 @@ async function runArchive(url) {
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
 
 
+
+
+
     console.log(`🌐 Visiting: ${url}`);
-    await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
-    
     //Experiment
     await sleep(2000);
 
