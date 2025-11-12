@@ -18,7 +18,7 @@ import { open } from "sqlite";
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS = ["cancel", "close", "dismiss", "Don't Allow", "don't allow", "dont allow", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS =  ["close", "dismiss", "Don't Allow", "don't allow", "dont allow", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
 const EXPAND_TERMS = ["Show Full Article",  "View Full Story", "Expand", "Continue Reading"];
 const BLACKLIST_TERMS = ["Watch later", "facebook", "print ad", "bookmark", "sign in", "login"];
 const CLICK_DELAY_MS = 100;
@@ -155,7 +155,16 @@ async function findMatchingClickableElements(frame, searchTerms) {
       };
 
       for (const el of elements) {
-        if (!isClickable(el)) continue;
+	
+	if (!isClickable(el)) continue;
+
+	// Skip long anchor links (article links, headlines)
+	if (el.tagName.toLowerCase() === "a") {
+	  const txt = (el.textContent || "").trim();
+	  if (txt.length > 20) continue; // skip long anchors
+	}
+
+
 
         const text = (el.textContent || el.value || "").trim();
         if (!text) continue;
@@ -227,46 +236,139 @@ async function simulateMouseClick(page, x, y) {
   await sleep(CLICK_DELAY_MS);
 }
 
+
+
 async function clickElements(page, elements) {
   for (const el of elements) {
     try {
-      // Skip long anchor text or likely article links
+      // Skip long anchors or obvious article links
       if (el.tag === "a") {
         const textLen = el.text.length;
         if (textLen > 15) {
           console.log(`⏭️ Skipping long <a> (${textLen} chars): "${el.text.slice(0, 40)}..."`);
           continue;
         }
-
-        // Optional: skip anchors that point to external domains
-        const href = await page.evaluate((x, y) => {
-          const node = document.elementFromPoint(x, y);
-          return node?.closest("a")?.href || "";
-        }, el.x, el.y);
-
-        if (href && !href.startsWith(window.location.origin)) {
-          console.log(`⏭️ Skipping external link: ${href}`);
-          continue;
-        }
       }
 
-      console.log(`🖱️ Clicking <${el.tag}> "${el.text}"`);
-      //await simulateMouseClick(page, el.x, el.y);
+      console.log(`🖱️ Clicking <${el.tag}> "${el.text}" safely`);
+
+      // 🧩 Inject a temporary global listener that blocks all navigations
+      await page.evaluate(() => {
+        window.__cancelNavigationPatch__ = true;
+        window.addEventListener(
+          "click",
+          e => {
+            // stop any anchor or button from changing location
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          },
+          true
+        );
+        window.addEventListener(
+          "beforeunload",
+          e => {
+            e.preventDefault();
+            e.returnValue = "";
+            return "";
+          },
+          true
+        );
+        window.onbeforeunload = null;
+        window.onunload = null;
+      });
+
+      // Dispatch synthetic click manually in DOM
       await page.evaluate((text) => {
-	  const btns = [...document.querySelectorAll('button, a, input')];
-	  const target = btns.find(b => (b.innerText || b.value || '').trim().toLowerCase().includes(text.toLowerCase()));
-	  if (target) {
-	    target.scrollIntoView({ block: 'center', behavior: 'instant' });
-	    target.click();
-	  }
-	}, el.text);
-	await sleep(1000);
+        const candidates = [...document.querySelectorAll("button, a, input, div[role='button']")];
+        const target = candidates.find(b =>
+          (b.innerText || b.value || "").trim().toLowerCase() === text.toLowerCase()
+        );
+        if (target) {
+          target.scrollIntoView({ block: "center", behavior: "instant" });
+          ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(type => {
+            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+          });
+        }
+      }, el.text);
+
+      await sleep(500);
+
+      // 🧹 Remove the global navigation blocker so normal links work again
+      await page.evaluate(() => {
+        if (window.__cancelNavigationPatch__) {
+          window.removeEventListener("click", () => {}, true);
+          delete window.__cancelNavigationPatch__;
+        }
+      });
 
     } catch (err) {
       console.warn(`⚠️ Failed to click "${el.text}": ${err.message}`);
     }
   }
 }
+
+
+/**
+ * Dismiss or remove OneSignal notification prompt safely.
+ * Clicks "Cancel" if possible, otherwise removes it and blocks reinjection.
+ */
+async function dismissOneSignalSlidedown(page) {
+  console.log("🔕 Trying to dismiss OneSignal slidedown…");
+
+  const result = await page.evaluate(async () => {
+    const cancel = document.getElementById("onesignal-slidedown-cancel-button");
+    const dialog = document.getElementById("onesignal-slidedown-dialog");
+    if (!dialog) return "absent";
+
+    // Make visible just in case
+    if (cancel) {
+      cancel.style.visibility = "visible";
+      cancel.style.opacity = "1";
+      cancel.style.pointerEvents = "auto";
+    }
+
+    // Helper to actually click it
+    const doClick = (btn) => {
+      ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(t =>
+        btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true }))
+      );
+    };
+
+    if (cancel) {
+      try {
+        cancel.scrollIntoView({ block: "center", behavior: "instant" });
+        doClick(cancel);
+      } catch {}
+    }
+
+    // Wait 1s for OneSignal internal handler to remove it
+    await new Promise(r => setTimeout(r, 1000));
+    const stillVisible = !!document.getElementById("onesignal-slidedown-dialog");
+    if (!stillVisible) return "clicked";
+
+    // 🧹 Force remove + future block
+    dialog.remove();
+    const style = document.createElement("style");
+    style.id = "__onesignal_block__";
+    style.textContent = `
+      #onesignal-slidedown-dialog,
+      .onesignal-slidedown-dialog,
+      #onesignal-bell-container,
+      .onesignal-bell-launcher { display:none!important; visibility:hidden!important; }
+    `;
+    document.head.appendChild(style);
+    try { sessionStorage.setItem("onesignal-slidedown-dismissed", "1"); } catch {}
+    return "removed";
+  });
+
+  if (result === "absent") console.log("ℹ️ No OneSignal dialog detected.");
+  else if (result === "clicked") console.log("✅ OneSignal dialog dismissed by click.");
+  else if (result === "removed") console.log("🧹 OneSignal dialog forcibly removed and blocked.");
+  else console.log("⚠️ Unexpected OneSignal dismiss result:", result);
+}
+
+
+
 
 
 //ClickCloseButton
@@ -389,18 +491,41 @@ async function clickPopups(page) {
     return;
   }
 
-  console.log(`🧹 Found ${matches.length} clickable element(s):`);
+  // Remove duplicates by text
+  const unique = [];
+  const seen = new Set();
   for (const el of matches) {
+    const key = (el.text || "").trim().toLowerCase();
+    if (!seen.has(key) && key) {
+      seen.add(key);
+      unique.push(el);
+    }
+  }
+
+  console.log(`🧹 Found ${unique.length} unique clickable element(s):`);
+  for (const el of unique) {
     const matched = SEARCH_TERMS.filter(t =>
       el.text.toLowerCase().includes(t.toLowerCase())
     );
     console.log(`   → <${el.tag}> "${el.text}" [${matched.join(", ")}]`);
   }
 
-  await clickElements(page, matches);
+  // ✅ Click only the first one that’s visible
+  const first = unique[0];
+  if (!first) {
+    console.log("ℹ️ No valid popup button to click.");
+    return;
+  }
+
+  console.log(`🖱️ Clicking popup button once: "${first.text}"`);
+  await clickElements(page, [first]);
   await sleep(1000);
+
   console.log("✅ Popup click pass done.\n");
 }
+
+
+
 
 
 async function triggerLazyLoadScroll(page) {
@@ -545,17 +670,17 @@ async function removeAdWrappers(page) {
 
 
 
+
+
 /**
- * Clicks the first expandable content trigger ("Show Full Article", "Read More", etc.)
- * Uses direct DOM click (not mouse coords). Works well with React/MUI.
- * Verifies expansion by aria-expanded, panel visibility, or paragraph count.
+ * Clicks "Read More" / "Show Full Article" / etc.
+ * Prioritizes News18 <div id="readmore_story"> wrapper (actual clickable element).
  */
 async function clickExpandableContent(page) {
   const EXPAND_TERMS = [
     "show full article",
     "view full story",
-    "Load More",
-    "Don't Allow",
+    "load more",
     "continue reading",
     "show more",
     "expand"
@@ -563,10 +688,9 @@ async function clickExpandableContent(page) {
 
   console.log("🔍 Searching for expandable content triggers...");
 
-  const clicked = await page.evaluate((terms) => {
-    const sel = "button, a, [role='button'], span[role='button']";
-    const all = Array.from(document.querySelectorAll(sel));
+  const clicked = await page.evaluate(async (terms) => {
     const lower = (s) => (s || "").toLowerCase();
+
     const isVisible = (el) => {
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
@@ -579,26 +703,36 @@ async function clickExpandableContent(page) {
       );
     };
 
-    const btn = all.find((el) => {
-      const text = (el.innerText || el.textContent || "").trim();
-      if (!text || text.length > 50) return false;
-      const t = lower(text);
-      return terms.some((term) => t.includes(lower(term))) && isVisible(el);
-    });
+    let btn = null;
+
+
+    // 🧩 2️⃣ Generic fallback for all other “expand” buttons
+    if (!btn) {
+      const sel = "button, a, [role='button'], span[role='button'], div, span";
+      const all = Array.from(document.querySelectorAll(sel));
+
+      btn = all.find((el) => {
+        const text = (el.innerText || el.textContent || "").trim();
+        if (!text || text.length > 80) return false;
+        const t = lower(text);
+        return terms.some((term) => t.includes(lower(term))) && isVisible(el);
+      });
+    }
 
     if (!btn) return false;
 
     btn.scrollIntoView({ block: "center", behavior: "instant" });
+    await new Promise((r) => setTimeout(r, 200)); // brief delay
 
-    // Dispatch full pointer/mouse event chain to simulate real user click
-    const ev = (type) =>
-      btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
     try {
-      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(ev);
+      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) =>
+        btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }))
+      );
     } catch {
       btn.click();
     }
-    return (btn.innerText || btn.textContent || "").trim();
+
+    return (btn.innerText || btn.textContent || "").trim() || btn.id || btn.className;
   }, EXPAND_TERMS);
 
   if (!clicked) {
@@ -607,38 +741,15 @@ async function clickExpandableContent(page) {
   }
 
   console.log(`🖱️ Programmatically clicked expandable trigger: "${clicked}"`);
-  await sleep(800);
+  await sleep(1000);
 
-  // Validate that content expanded
-  const expanded = await page.evaluate((terms) => {
-    const lower = (s) => (s || "").toLowerCase();
-    const btnSel = "button, a, [role='button'], span[role='button']";
-    const btn = Array.from(document.querySelectorAll(btnSel)).find((el) =>
-      terms.some((t) => lower((el.innerText || el.textContent || "")).includes(lower(t)))
-    );
-
-    if (btn && btn.getAttribute("aria-expanded") === "true") return true;
-
-    if (btn && btn.getAttribute("aria-controls")) {
-      const panel = document.getElementById(btn.getAttribute("aria-controls"));
-      if (panel) {
-        const cs = getComputedStyle(panel);
-        const rect = panel.getBoundingClientRect();
-        if (
-          cs.display !== "none" &&
-          cs.visibility !== "hidden" &&
-          rect.height > 5 &&
-          cs.opacity !== "0"
-        ) return true;
-      }
-    }
-
-    // fallback: paragraph count increase
-    const art = document.querySelector("article, main") || document.body;
+  // 🧩 Verify expansion by paragraph count
+  const expanded = await page.evaluate(() => {
+    const art = document.querySelector("article, main, section") || document.body;
     const p = art.querySelectorAll("p");
     if (!window.__pCount) window.__pCount = p.length;
     return p.length > window.__pCount;
-  }, EXPAND_TERMS);
+  });
 
   if (expanded) {
     console.log("✅ Content expanded successfully.");
@@ -646,6 +757,117 @@ async function clickExpandableContent(page) {
     console.log("⚠️ Expansion not detected. Continuing...");
   }
 }
+
+
+
+
+/**
+ * Clicks "Read More" button on pages like News18.
+ * Covers both div/span wrapper patterns and generic ones.
+ */
+async function clickReadMore(page) {
+  console.log("🔍 Looking specifically for a 'Read More' button...");
+
+  const success = await page.evaluate(async () => {
+    const isVisible = (el) => {
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return (
+        r.width > 4 &&
+        r.height > 4 &&
+        cs.display !== "none" &&
+        cs.visibility !== "hidden" &&
+        cs.opacity !== "0"
+      );
+    };
+
+    // Try the known News18-specific structure first
+    let btn =
+      document.querySelector("div[id^='readmore_story'] .news18_read_more") ||
+      document.querySelector(".news18_read_more") ||
+      document.querySelector("div[id^='readmore_story'], .rmbtn-box");
+
+    if (btn && !isVisible(btn)) btn = null;
+
+    // If not found, try generic matches
+    if (!btn) {
+      const candidates = Array.from(document.querySelectorAll("button, a, span, div"));
+      btn = candidates.find((el) => {
+        const text = (el.innerText || el.textContent || "").trim().toLowerCase();
+        return text === "read more" || text.includes("read more");
+      });
+    }
+
+    if (!btn) {
+      console.log("❌ No 'Read More' found in DOM.");
+      return false;
+    }
+
+    btn.scrollIntoView({ block: "center", behavior: "instant" });
+    await new Promise((r) => setTimeout(r, 200)); // brief delay before click
+
+    // Dispatch full event chain for reliability
+    try {
+      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+        btn.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+        );
+      });
+    } catch {
+      btn.click();
+    }
+
+    console.log("✅ Clicked Read More:", btn.outerHTML.slice(0, 120));
+    return true;
+  });
+
+  if (success) {
+    console.log("🖱️ 'Read More' click executed successfully.");
+    await sleep(1000);
+  } else {
+    console.log("ℹ️ No 'Read More' button clicked.");
+  }
+}
+
+
+/**
+ * clickBottomFooterButton(page)
+ * ---------------------------------------------------
+ * Finds the bottom-footer sticky ad container and clicks
+ * its toggle/close button. If the click fails or button
+ * not found, hides the container so it doesn’t block layout.
+ */
+async function clickBottomFooterButton(page) {
+  await page.evaluate(() => {
+    // Selector for the sticky ad container and toggle button
+    const adSelector = 'div._ap_apex_ad[style*="position: fixed"][data-section]';
+    const adEl = document.querySelector(adSelector);
+    if (!adEl) return;
+
+    const sectionId = adEl.getAttribute('data-section');
+    const toggleSelector = `span.stickyToggleButton-${sectionId}`;
+    const toggleBtn = adEl.querySelector(toggleSelector);
+
+    if (toggleBtn) {
+      try {
+        toggleBtn.scrollIntoView({ block: "center", behavior: "instant" });
+        toggleBtn.click();
+        return;
+      } catch (err) {
+        // proceed to fallback
+      }
+    }
+
+    // Fallback: hide the ad container
+    adEl.style.display = 'none';
+    adEl.style.visibility = 'hidden';
+    adEl.style.pointerEvents = 'none';
+    adEl.style.height = '0px';
+    adEl.style.margin = '0 !important';
+    adEl.style.padding = '0 !important';
+  });
+}
+
 
 
 
@@ -714,6 +936,60 @@ async function restoreStickyFooters(page) {
     if (style) style.remove();
   });
 }
+
+
+
+
+// cleanup/ads.js
+export async function removeAllGoogleAds(pageOrHtml) {
+  const adRegexes = [
+    // Sticky ADP and adpTags containers
+    /<div[^>]*class=["'](?:adp_interactive_ad|_ap_apex_ad)[^"']*["'][\s\S]*?<\/div>\s*<\/div>/gi,
+    // Sticky footer/top ad blocks
+    /<div[^>]*id=["']STICKY_ADP_[^"']*["'][\s\S]*?<\/div>\s*/gi,
+    // Google ad iframes and containers
+    /<iframe[^>]*id=["']google_ads_iframe_[^"']*["'][\s\S]*?<\/iframe>\s*/gi,
+    /<div[^>]*id=["']google_ads_iframe_[^"']*["'][\s\S]*?<\/div>\s*/gi,
+    // GPT display script calls
+    /<script[^>]*>\s*googletag\.cmd\.push\([\s\S]*?\);\s*<\/script>/gi,
+    // Divs with Google ad query identifiers
+    /<div[^>]*data-google-query-id=["'][^"']+["'][\s\S]*?<\/div>\s*/gi,
+    // Generic ADP data attributes (adpTags, adp networks)
+    /<div[^>]*(data-ap-network|data-section)=["'][^"']+["'][\s\S]*?<\/div>\s*/gi,
+  ];
+
+  // --- HTML string mode ---
+  if (typeof pageOrHtml === "string") {
+    let cleaned = pageOrHtml;
+    for (const regex of adRegexes) {
+      cleaned = cleaned.replace(regex, "<!-- 🧩 removed ad block -->");
+    }
+    return cleaned;
+  }
+
+  // --- Puppeteer page mode ---
+  const page = pageOrHtml;
+  await page.evaluate(() => {
+    // Remove ADP/adpTags containers
+    document.querySelectorAll('.adp_interactive_ad, ._ap_apex_ad, [data-ap-network], [data-section]').forEach(el => el.remove());
+    // Remove sticky ad containers
+    document.querySelectorAll('[id^="STICKY_ADP_"]').forEach(el => el.remove());
+    // Remove Google ad iframes and wrappers
+    document.querySelectorAll('iframe[id^="google_ads_iframe_"]').forEach(el => {
+      const container = el.closest('div[id*="google_ads_iframe"]') || el.parentElement;
+      if (container) container.remove();
+      else el.remove();
+    });
+    // Remove query-marked Google ad divs
+    document.querySelectorAll('[data-google-query-id]').forEach(el => el.remove());
+    // Remove inline GPT ad scripts
+    document.querySelectorAll('script').forEach(s => {
+      if (/googletag\.cmd\.push/.test(s.textContent)) s.remove();
+    });
+  });
+}
+
+
 
 async function removeIzootoBranding(page) {
   try {
@@ -805,93 +1081,251 @@ async function removeFloatingExplainers(page) {
 
 
 
+// cleanup/ads.js
+export async function removeFooterAds(pageOrHtml) {
+  if (typeof pageOrHtml === "string") {
+    return pageOrHtml.replace(
+      /<div[^>]*class=["']td-fix-index["'][\s\S]*?<\/div>\s*<\/div>/gi,
+      "<!-- 🧩 removed ThePrint footer ad -->"
+    );
+  } else {
+    await pageOrHtml.evaluate(() => {
+      document.querySelectorAll('.td-fix-index').forEach(el => el.remove());
+    });
+  }
+}
+
+
+
+/**
+ * Robust: clicks the 'Load More' <a> inside updateBtn 4 times,
+ * scrolling between clicks and waiting for new items.
+ */
+async function clickLoadMoreAndScroll(page) {
+  console.log("🔁 Clicking 'Load More' up to 4 times with scroll...");
+
+  for (let i = 1; i <= 4; i++) {
+    const found = await page.evaluate(() => {
+      // Try News18 / styled-JSX pattern first
+      let btn =
+        document.querySelector("div.updateBtn a.vwmore") ||
+        document.querySelector("a.vwmore") ||
+        document.querySelector("div.updateBtn");
+
+      if (!btn) {
+        // Generic fallback
+        btn = Array.from(
+          document.querySelectorAll("a, button, div, span, [role='button']")
+        ).find(el =>
+          /load\s*more/i.test(el.innerText || el.textContent || "")
+        );
+      }
+
+      if (!btn) return null;
+
+      const rect = btn.getBoundingClientRect();
+      const style = getComputedStyle(btn);
+      const visible =
+        rect.width > 4 &&
+        rect.height > 4 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0";
+      if (!visible) return null;
+
+      btn.scrollIntoView({ block: "center", behavior: "instant" });
+
+      // Dispatch synthetic events for reliability
+      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(t =>
+        btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true }))
+      );
+
+      return btn.outerHTML.slice(0, 100);
+    });
+
+    if (!found) {
+      console.log(`ℹ️ No visible "Load More" on iteration #${i}, stopping.`);
+      break;
+    }
+
+    console.log(`🖱️ Clicked 'Load More' #${i}: ${found}`);
+    await sleep(1500);
+
+    // ✅ Scroll to trigger lazy loading after each click
+    await page.evaluate(async () => {
+      for (let y = 0; y < window.innerHeight * 0.8; y += 100) {
+        window.scrollBy(0, 100);
+        await new Promise(r => setTimeout(r, 40));
+      }
+    });
+
+    await sleep(1500); // let new items render
+  }
+
+  console.log("✅ Completed 'Load More' + scroll sequence.\n");
+}
+
+
+
+/**
+ * Remove OneSignal floating bell launcher and block future reinjection.
+ * Works even if injected dynamically after page load.
+ */
+async function removeOneSignalBell(page) {
+  console.log("🔕 Removing OneSignal bell launcher...");
+
+  const removed = await page.evaluate(() => {
+    try {
+      let count = 0;
+      const selectors = [
+        '#onesignal-bell-launcher',
+        '.onesignal-bell-launcher',
+        '#onesignal-bell-container',
+        '[id*="onesignal-bell"]',
+        '[class*="onesignal-bell"]'
+      ];
+
+      // Remove existing bell elements
+      document.querySelectorAll(selectors.join(',')).forEach(el => {
+        el.remove();
+        count++;
+      });
+
+      // Inject persistent blocker to stop reinjection
+      const styleId = '__onesignal_bell_block__';
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = `
+          #onesignal-bell-launcher,
+          .onesignal-bell-launcher,
+          #onesignal-bell-container,
+          [id*="onesignal-bell"],
+          [class*="onesignal-bell"] {
+            display: none !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+
+      // Mark in sessionStorage to discourage reinit
+      try { sessionStorage.setItem("onesignal-bell-removed", "1"); } catch {}
+
+      return count;
+    } catch (err) {
+      console.warn("⚠️ removeOneSignalBell error:", err.message);
+      return 0;
+    }
+  });
+
+  if (removed > 0) {
+    console.log(`🧹 Removed ${removed} OneSignal bell element(s) and blocked reinjection.`);
+  } else {
+    console.log("ℹ️ No OneSignal bell found (maybe already removed or blocked).");
+  }
+}
+
+
 async function saveArchive(page, url) {
   const title = slugFromUrl(url);
   const archiveId = makeArchiveId(url, title);
   const outdir = path.join(ARCHIVE_BASE, archiveId);
   fs.mkdirSync(outdir, { recursive: true });
   console.log(`\n🗄️  Starting archive save in: ${outdir}`);
-  
-  
+
+  // ✅ Capture pristine DOM early before modification
+  const rawHtml = await page.content();
+  const realPath = path.join(outdir, "page_raw.html");
+  fs.writeFileSync(realPath, rawHtml, "utf8");
+  console.log(`💾 Saved original HTML snapshot: ${realPath}`);
+
+	
+  // Now modify the live page
+  await dismissOneSignalSlidedown(page);
+  await removeOneSignalBell(page);
   await clickPopups(page);
-  //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
 
-  const htmlPath = path.join(outdir, "page.html");
-  
-
-// --- inject a literal <script> into the saved HTML so archived file contains it ---
-const injectionId = "__injected_nav_blocker_fe__";
-const injectionScript = `<script id="${injectionId}">
-  try {
-    if (window.navigation) {
-      try {
-        window.navigation.onnavigate = e => {
-          if (e.sourceElement) return;
-          e.preventDefault();
-        };
-      } catch (err) {
+  // --- inject a literal <script> into the saved HTML so archived file contains it ---
+  const injectionId = "__injected_nav_blocker_fe__";
+  const injectionScript = `<script id="${injectionId}">
+    try {
+      if (window.navigation) {
         try {
-          window.navigation.addEventListener?.('navigate', ev => {
-            if (ev.sourceElement) return;
-            ev.preventDefault();
-          });
-        } catch (__) {}
+          window.navigation.onnavigate = e => {
+            if (e.sourceElement) return;
+            e.preventDefault();
+          };
+        } catch (err) {
+          try {
+            window.navigation.addEventListener?.('navigate', ev => {
+              if (ev.sourceElement) return;
+              ev.preventDefault();
+            });
+          } catch (__) {}
+        }
       }
-    }
-  } catch (ignore) {}
-</script>`;
-
-
-
-
-
-
-
-  let html = await page.content();
-
-	// --- 🧩 Remove Financial Express redirect scripts ---
-	//html = html.replace(
-	  ///<script[^>]*>[\s\S]*?(arewehome|financialexpress\.com)[\s\S]*?<\/script>/gi,
-	  //"<!-- 🧩 removed FE redirect script -->"
-	//);
-
-	// --- Optional: remove any meta refresh redirects ---
-	//html = html.replace(
-	  ///<meta[^>]*http-equiv=["']refresh["'][^>]*>/gi,
-	  //"<!-- 🧩 removed meta-refresh -->"
-	//);
-
-// don't inject twice
-if (!/id=["']__injected_nav_blocker_fe__["']/.test(html)) {
-  if (/<head[\s>]/i.test(html)) {
-    // inject right after opening <head>
-    html = html.replace(/<head([\s>])/i, (m, g1) => `<head${g1}\n${injectionScript}\n`);
-  } else if (/<html[\s>]/i.test(html)) {
-    // no head but has html: insert a head block after <html>
-    html = html.replace(/<html([\s>])/i, (m, g1) => `<html${g1}\n<head>\n${injectionScript}\n</head>\n`);
-  } else {
-    // fallback: prepend to the file
-    html = injectionScript + "\n" + html;
-  }
-}
-
-
-  fs.writeFileSync(htmlPath, html, "utf8");
-  console.log(`✅ Saved HTML without FE redirect logic: ${htmlPath}`);
-
+    } catch (ignore) {}
+  </script>`;
 
   await triggerLazyLoadScroll(page);
-  await clickPopups(page);
+
+  // ✅ Capture modified DOM now
+  let modifiedHtml = await page.content();
+
+  // Inject navigation-blocker script safely
+  if (!/id=["']__injected_nav_blocker_fe__["']/.test(modifiedHtml)) {
+    if (/<head[^>]*>/i.test(modifiedHtml)) {
+      modifiedHtml = modifiedHtml.replace(/<head[^>]*>/i, m => `${m}\n${injectionScript}`);
+    } else if (/<html[^>]*>/i.test(modifiedHtml)) {
+      modifiedHtml = modifiedHtml.replace(/<html[^>]*>/i, m => `${m}\n<head>\n${injectionScript}\n</head>\n`);
+    } else {
+      modifiedHtml = `${injectionScript}\n${modifiedHtml}`;
+    }
+  }
+  //await hideStickyFooters(page);
+
+  await clickBottomFooterButton(page);
+  //await removeFooterAds(page);
+
+
+  await removeAllGoogleAds(page);
+
+  const htmlPath = path.join(outdir, "page.html");
+  fs.writeFileSync(htmlPath, modifiedHtml, "utf8");
+  console.log(`✅ Saved sanitized HTML: ${htmlPath}`);
+
+  //await triggerLazyLoadScroll(page);
+  //await clickPopups(page);
   //await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
-  await page.setBypassCSP(true);
-  await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
+  //await directClickAnyCloseButton(page);
+  //await page.setBypassCSP(true);
+  //await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
 
   await clickExpandableContent(page); 
   
-  await hideStickyFooters(page);
+  //await hideStickyFooters(page);
   await sleep(300);
+
+
+// 🧩 Fix ThePrint white PDF/screenshot issue
+await page.evaluate(() => {
+  document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
+    const s = getComputedStyle(el);
+    if (s.transform && s.transform !== 'none') el.style.transform = 'none';
+    if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
+    if (s.height && s.height !== 'auto') el.style.height = 'auto';
+    if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
+  });
+  document.body.style.background = '#fff';
+  document.documentElement.style.background = '#fff';
+  window.scrollTo(0, 0);
+});
+
+
+
 
 // 🧭 ensure scroll, animations, and network quiet before screenshot
 await page.evaluate(() => new Promise(resolve => {
@@ -901,8 +1335,9 @@ await page.evaluate(() => new Promise(resolve => {
   });
 }));
 await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
-
-  const screenshotPath = path.join(outdir, "screenshot.png");
+//await clickBottomFooterButton(page); 
+  //await removeFooterAds(page);
+	const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
 
@@ -912,12 +1347,12 @@ await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {})
   //await sleep(400);
 
   await triggerLazyLoadScroll(page);
-  await clickPopups(page);
-  await clickVisualCloseButton(page);
-  await directClickAnyCloseButton(page);
-  await removeBackToTopButton(page);
-  await removeAdWrappers(page);
-  await sleep(300);
+  //await clickPopups(page);
+  //await clickVisualCloseButton(page);
+  //await directClickAnyCloseButton(page);
+  //await removeBackToTopButton(page);
+  //await removeAdWrappers(page);
+  //await sleep(300);
 
 
   const pdfPath = path.join(outdir, "page.pdf");
@@ -927,70 +1362,97 @@ await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {})
 
 
 
+// await page.evaluate(() => {
+//   try {
+//     let style = document.getElementById('__hide_headers_style');
+//     if (!style) {
+//       style = document.createElement('style');
+//       style.id = '__hide_headers_style';
+//       document.head.appendChild(style);
+//     }
+
+//     style.textContent = `
+//       /* Hide sticky headers, navbars, and floating menus */
+//       header,
+//       nav,
+//       [class*="header"],
+//       [class*="top-bar"],
+//       [class*="menu-bar"],
+//       [class*="headMenu"],
+//       [class*="fixedNav"],
+//       [class*="leftFixedNav"],
+//       [class*="leftSecNav"],
+//       [class*="moreNav"],
+//       [id*="sticky"],
+//       [id*="header"],
+//       [id*="navbar"],
+//       [style*="position:fixed"],
+//       [style*="position: sticky"] {
+//         display: none !important;
+//         visibility: hidden !important;
+//         height: 0 !important;
+//         min-height: 0 !important;
+//         overflow: hidden !important;
+//         position: static !important;
+//       }
+
+//       /* Restore normal flow */
+//       html, body {
+//         height: auto !important;
+//         overflow: visible !important;
+//       }
+
+//       main, article, section {
+//         height: auto !important;
+//         overflow: visible !important;
+//         transform: none !important;
+//       }
+
+//       /* Force content containers to unclip */
+//       [style*="overflow:hidden"],
+//       [style*="overflow: clip"] {
+//         overflow: visible !important;
+//       }
+//     `;
+//   } catch (err) {
+//     console.warn("⚠️ Failed to inject header-hide styles:", err.message);
+//   }
+// });
+
+
+
+	//await hideStickyFooters(page);
+	//await removeIzootoBranding(page);
+	//await removeFloatingExplainers(page);
+
+
+	// ✅ Minimal anti-clip patch for screen PDFs
+	await page.evaluate(() => {
+	  document.querySelectorAll('*').forEach(e => {
+	    const s = getComputedStyle(e);
+	    if (s.overflow.includes('hidden')) e.style.overflow = 'visible';
+	    if (['fixed','sticky'].includes(s.position)) e.style.position = 'static';
+	  });
+	  document.body.style.overflow = document.documentElement.style.overflow = 'visible';
+	});
+	await sleep(300); // small repaint buffer
+
+
+// Fix ThePrint white rendering (GPU layer + overflow issue)
 await page.evaluate(() => {
-  try {
-    let style = document.getElementById('__hide_headers_style');
-    if (!style) {
-      style = document.createElement('style');
-      style.id = '__hide_headers_style';
-      document.head.appendChild(style);
-    }
-
-    style.textContent = `
-      /* Hide sticky headers, navbars, and floating menus */
-      header,
-      nav,
-      [class*="header"],
-      [class*="top-bar"],
-      [class*="menu-bar"],
-      [class*="headMenu"],
-      [class*="fixedNav"],
-      [class*="leftFixedNav"],
-      [class*="leftSecNav"],
-      [class*="moreNav"],
-      [id*="sticky"],
-      [id*="header"],
-      [id*="navbar"],
-      [style*="position:fixed"],
-      [style*="position: sticky"] {
-        display: none !important;
-        visibility: hidden !important;
-        height: 0 !important;
-        min-height: 0 !important;
-        overflow: hidden !important;
-        position: static !important;
-      }
-
-      /* Restore normal flow */
-      html, body {
-        height: auto !important;
-        overflow: visible !important;
-      }
-
-      main, article, section {
-        height: auto !important;
-        overflow: visible !important;
-        transform: none !important;
-      }
-
-      /* Force content containers to unclip */
-      [style*="overflow:hidden"],
-      [style*="overflow: clip"] {
-        overflow: visible !important;
-      }
-    `;
-  } catch (err) {
-    console.warn("⚠️ Failed to inject header-hide styles:", err.message);
-  }
+  document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
+    const s = getComputedStyle(el);
+    if (s.transform && s.transform !== 'none') el.style.transform = 'none';
+    if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
+    if (s.height && s.height !== 'auto') el.style.height = 'auto';
+    if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
+  });
+  document.body.style.background = '#fff';
+  document.documentElement.style.background = '#fff';
 });
 
 
-
-	await hideStickyFooters(page);
-	await removeIzootoBranding(page);
-	await removeFloatingExplainers(page);
-
-	await sleep(300);
+	await sleep(3000);
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
 	await page.pdf({
@@ -1138,7 +1600,7 @@ async function directClickAnyCloseButton(page) {
 
 async function runArchive(url) {
   const browser = await puppeteer.launch({
-    headless: "None",
+    headless: false,
     ignoreDefaultArgs: ["--enable-automation"],
     protocolTimeout: 180000,
     args: [
@@ -1149,6 +1611,9 @@ async function runArchive(url) {
       "--no-first-run",
       "--no-zygote",
       "--disable-gpu",
+      "--disable-web-security",
+      "--disable-features=IsolateOrigins,site-per-process"
+    
     ],
   });
 
@@ -1179,11 +1644,18 @@ async function runArchive(url) {
     //}
 
 	  
-    await clickPopups(page);
-    await directClickAnyCloseButton(page);
+    //await clickPopups(page);
+    //await directClickAnyCloseButton(page);
     await clickExpandableContent(page);
-    await removeJioSaavnWidget(page);
+    await clickReadMore(page);
+    //await clickLoadMoreAndScroll(page);
+    
+    //await removeJioSaavnWidget(page);
 
+    await clickBottomFooterButton(page);
+    
+    await removeAllGoogleAds(page);
+    
     await saveArchive(page, url);
     console.log("✅ Archive done.");
     return true;
@@ -1205,7 +1677,7 @@ async function processQueue(queue) {
     }
     console.log(`📦 Processing job #${job.id}: ${job.url}`);
     const ok = await runArchive(job.url);
-    await queue.updateJobStatus(job.id, ok ? "completed" : "failed", ok ? null : "Archive failed");
+    await queue.updateJobStatus(job.id, ok ? "complete" : "failed", ok ? null : "Archive failed");
     const stats = await queue.getStats();
     console.log(`📊 Stats: ${JSON.stringify(stats)}`);
   }
