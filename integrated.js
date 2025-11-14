@@ -7,13 +7,26 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 // Activate stealth before anything else
 puppeteer.use(StealthPlugin());
 
-import fs from "fs";
+
+// FIX: Split fs modules correctly
+import fs from "fs/promises";      // async version
+import fssync from "fs";           // sync version only
+
+//import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { setTimeout as sleep } from "timers/promises";
 import { fileURLToPath } from "url";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
+
+// --- SingleFile integration ---
+import {
+  script as SINGLEFILE_SCRIPT,
+  hookScript as SINGLEFILE_HOOK,
+  zipScript as SINGLEFILE_ZIP
+} from "./single-file-cli/lib/single-file-bundle.js";
+
 
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
@@ -478,7 +491,6 @@ export async function clickVisualCloseButton(page) {
   console.log("⚠️ No clickable close button found anywhere.");
   return false;
 }
-
 
 
 //ClickPopupsButton
@@ -1166,6 +1178,40 @@ async function clickLoadMoreAndScroll(page) {
 }
 
 
+async function captureWithSingleFile(page, outdir, filename = "singleFile.html") {
+  const savePath = path.join(outdir, filename);
+
+  const sfData = await page.evaluate(async (zipScript) => {
+    return await window.singlefile.getPageData({
+      compressContent: false,
+      removeHiddenElements: false,
+      removeUnusedStyles: false,
+      removeUnusedFonts: false,
+      removeAlternativeImages: false,
+      removeAlternativeMedias: false,
+      blockScripts: true,
+      blockVideos: false,
+      blockAudios: false,
+      zipScript
+    });
+  }, SINGLEFILE_ZIP);
+
+  if (!sfData || !sfData.content) {
+    throw new Error("SingleFile returned empty content.");
+  }
+
+  const html =
+    typeof sfData.content === "string"
+      ? sfData.content
+      : Buffer.from(sfData.content).toString("utf8");
+
+  // FIXED: correct fs.promises.writeFile usage
+  await fs.writeFile(savePath, html, { encoding: "utf8" });
+
+  console.log(`💾 Saved SingleFile HTML: ${savePath}`);
+  return savePath;
+}
+
 
 /**
  * Remove OneSignal floating bell launcher and block future reinjection.
@@ -1233,68 +1279,67 @@ async function saveArchive(page, url) {
   const title = slugFromUrl(url);
   const archiveId = makeArchiveId(url, title);
   const outdir = path.join(ARCHIVE_BASE, archiveId);
-  fs.mkdirSync(outdir, { recursive: true });
+  fssync.mkdirSync(outdir, { recursive: true });
   console.log(`\n🗄️  Starting archive save in: ${outdir}`);
 
   // ✅ Capture pristine DOM early before modification
   const rawHtml = await page.content();
   const realPath = path.join(outdir, "page_raw.html");
-  fs.writeFileSync(realPath, rawHtml, "utf8");
+  fssync.writeFileSync(realPath, rawHtml, "utf8");
   console.log(`💾 Saved original HTML snapshot: ${realPath}`);
-
 	
   // Now modify the live page
-  await dismissOneSignalSlidedown(page);
-  await removeOneSignalBell(page);
-  await clickPopups(page);
+  // await dismissOneSignalSlidedown(page);
+  // await removeOneSignalBell(page);
+  // await clickPopups(page);
 
   // --- inject a literal <script> into the saved HTML so archived file contains it ---
-  const injectionId = "__injected_nav_blocker_fe__";
-  const injectionScript = `<script id="${injectionId}">
-    try {
-      if (window.navigation) {
-        try {
-          window.navigation.onnavigate = e => {
-            if (e.sourceElement) return;
-            e.preventDefault();
-          };
-        } catch (err) {
-          try {
-            window.navigation.addEventListener?.('navigate', ev => {
-              if (ev.sourceElement) return;
-              ev.preventDefault();
-            });
-          } catch (__) {}
-        }
-      }
-    } catch (ignore) {}
-  </script>`;
+  // const injectionId = "__injected_nav_blocker_fe__";
+  // const injectionScript = `<script id="${injectionId}">
+  //   try {
+  //     if (window.navigation) {
+  //       try {
+  //         window.navigation.onnavigate = e => {
+  //           if (e.sourceElement) return;
+  //           e.preventDefault();
+  //         };
+  //       } catch (err) {
+  //         try {
+  //           window.navigation.addEventListener?.('navigate', ev => {
+  //             if (ev.sourceElement) return;
+  //             ev.preventDefault();
+  //           });
+  //         } catch (__) {}
+  //       }
+  //     }
+  //   } catch (ignore) {}
+  // </script>`;
 
-  await triggerLazyLoadScroll(page);
+  // await triggerLazyLoadScroll(page);
 
   // ✅ Capture modified DOM now
   let modifiedHtml = await page.content();
 
-  // Inject navigation-blocker script safely
-  if (!/id=["']__injected_nav_blocker_fe__["']/.test(modifiedHtml)) {
-    if (/<head[^>]*>/i.test(modifiedHtml)) {
-      modifiedHtml = modifiedHtml.replace(/<head[^>]*>/i, m => `${m}\n${injectionScript}`);
-    } else if (/<html[^>]*>/i.test(modifiedHtml)) {
-      modifiedHtml = modifiedHtml.replace(/<html[^>]*>/i, m => `${m}\n<head>\n${injectionScript}\n</head>\n`);
-    } else {
-      modifiedHtml = `${injectionScript}\n${modifiedHtml}`;
-    }
-  }
-  //await hideStickyFooters(page);
+  // // Inject navigation-blocker script safely
+  // if (!/id=["']__injected_nav_blocker_fe__["']/.test(modifiedHtml)) {
+  //   if (/<head[^>]*>/i.test(modifiedHtml)) {
+  //     modifiedHtml = modifiedHtml.replace(/<head[^>]*>/i, m => `${m}\n${injectionScript}`);
+  //   } else if (/<html[^>]*>/i.test(modifiedHtml)) {
+  //     modifiedHtml = modifiedHtml.replace(/<html[^>]*>/i, m => `${m}\n<head>\n${injectionScript}\n</head>\n`);
+  //   } else {
+  //     modifiedHtml = `${injectionScript}\n${modifiedHtml}`;
+  //   }
+  // }
+  // await hideStickyFooters(page);
 
-  await clickBottomFooterButton(page);
+  // await clickBottomFooterButton(page);
   //await removeFooterAds(page);
 
 
-  await removeAllGoogleAds(page);
+  // await removeAllGoogleAds(page);
 
   const htmlPath = path.join(outdir, "page.html");
-  fs.writeFileSync(htmlPath, modifiedHtml, "utf8");
+  fssync.writeFileSync(htmlPath, modifiedHtml, "utf8");
   console.log(`✅ Saved sanitized HTML: ${htmlPath}`);
 
   //await triggerLazyLoadScroll(page);
@@ -1311,18 +1356,18 @@ async function saveArchive(page, url) {
 
 
 // 🧩 Fix ThePrint white PDF/screenshot issue
-await page.evaluate(() => {
-  document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
-    const s = getComputedStyle(el);
-    if (s.transform && s.transform !== 'none') el.style.transform = 'none';
-    if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
-    if (s.height && s.height !== 'auto') el.style.height = 'auto';
-    if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
-  });
-  document.body.style.background = '#fff';
-  document.documentElement.style.background = '#fff';
-  window.scrollTo(0, 0);
-});
+// await page.evaluate(() => {
+//   document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
+//     const s = getComputedStyle(el);
+//     if (s.transform && s.transform !== 'none') el.style.transform = 'none';
+//     if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
+//     if (s.height && s.height !== 'auto') el.style.height = 'auto';
+//     if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
+//   });
+//   document.body.style.background = '#fff';
+//   document.documentElement.style.background = '#fff';
+//   window.scrollTo(0, 0);
+// });
 
 
 
@@ -1452,7 +1497,7 @@ await page.evaluate(() => {
 });
 
 
-	await sleep(3000);
+	// await sleep(3000);
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
 	await page.pdf({
@@ -1479,8 +1524,59 @@ await page.evaluate(() => {
     metrics,
     archive_id: archiveId,
   };
-  fs.writeFileSync(path.join(outdir, "meta.json"), JSON.stringify(meta, null, 2));
+  fssync.writeFileSync(path.join(outdir, "meta.json"), JSON.stringify(meta, null, 2));
   console.log("🧾 Saved meta.json");
+
+
+  console.log("🔄 Preparing clean environment for SingleFile…");
+
+  // 🔥 Remove earlier click-blockers, unload blockers, sticky patches
+  await page.evaluate(() => {
+    try {
+      window.onbeforeunload = null;
+      window.onunload = null;
+      window.__cancelNavigationPatch__ = false;
+      document.querySelectorAll('style#__hide_footer_style').forEach(s => s.remove());
+      document.querySelectorAll('style#__onesignal_bell_block__').forEach(s => s.remove());
+    } catch {}
+  });
+
+  // 🔥 RE-INJECT SingleFile BEFORE reload
+  await page.evaluateOnNewDocument(() => {}); // flush previous scripts
+  await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+  await page.evaluateOnNewDocument(`
+    ${SINGLEFILE_SCRIPT}
+    window.singlefile = singlefile;
+  `);
+
+console.log("🔄 Reloading clean page (sandbox reset)…");
+
+// Step 1: Completely reset the world by loading a blank document
+await page.goto("about:blank", { waitUntil: "domcontentloaded" });
+
+// Step 2: Re-inject SingleFile engine on clean context
+await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+await page.evaluateOnNewDocument(`
+  ${SINGLEFILE_SCRIPT}
+  window.singlefile = singlefile;
+`);
+
+// Step 3: Navigate to target URL WITHOUT heavy JS execution
+await page.setJavaScriptEnabled(false);
+await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+await page.setJavaScriptEnabled(true);
+
+// Step 4: Let JS run now that SingleFile engine is ready
+await page.evaluate(() => new Promise(r => setTimeout(r, 1500)));
+
+// Step 5: Load lazy elements
+await triggerLazyLoadScroll(page);
+
+// Step 6: Capture
+console.log("📦 Running final SingleFile capture…");
+await captureWithSingleFile(page, outdir, "singleFile.html");
+
+
 }
 
 
@@ -1619,6 +1715,18 @@ async function runArchive(url) {
 
   try {
     const page = await browser.newPage();
+    
+	// ------------------------------------------------------------
+	// Inject SingleFile BEFORE page loads (Critical placement)
+	// ------------------------------------------------------------
+	await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+	await page.evaluateOnNewDocument(`
+	  ${SINGLEFILE_SCRIPT}
+	  window.singlefile = singlefile;
+	`);
+
+
+
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
     await page.setExtraHTTPHeaders({
@@ -1627,6 +1735,14 @@ async function runArchive(url) {
     });
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
 
+	// ------------------------------------------------------------
+	// Inject SingleFile into page BEFORE load
+	// ------------------------------------------------------------
+	await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+	await page.evaluateOnNewDocument(`
+	  ${SINGLEFILE_SCRIPT}
+	  window.singlefile = singlefile;
+	`);
 
 
 
@@ -1657,6 +1773,7 @@ async function runArchive(url) {
     await removeAllGoogleAds(page);
     
     await saveArchive(page, url);
+
     console.log("✅ Archive done.");
     return true;
   } catch (err) {
