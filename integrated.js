@@ -31,7 +31,7 @@ import {
 /* -------------------------------------------------------------------------- */
 /*                                   CONFIG                                   */
 /* -------------------------------------------------------------------------- */
-const SEARCH_TERMS =  ["close", "dismiss", "Don't Allow", "don't allow", "dont allow", "Later", "ok", "Reject",  "decline", "no thanks", "I'll Give Later"];
+const SEARCH_TERMS =  ["close", "dismiss", "Don't Allow", "don't allow", "dont allow", "Later", "ok", "Reject",  "decline", "Decline Cookies", "no thanks", "I'll Give Later"];
 const EXPAND_TERMS = ["Show Full Article",  "View Full Story", "Expand", "Continue Reading"];
 const BLACKLIST_TERMS = ["Watch later", "facebook", "print ad", "bookmark", "sign in", "login"];
 const CLICK_DELAY_MS = 100;
@@ -492,18 +492,73 @@ export async function clickVisualCloseButton(page) {
   return false;
 }
 
+async function removeCookiePopup(page) {
+  try {
+    await page.evaluate(() => {
+      const selectors = [
+        '.cookies-popup',
+        '#popup2',
+        '.cookies-popup.open'
+      ];
+
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) el.remove();
+      }
+    });
+    console.log("🍪 Cookie popup removed (if present).");
+  } catch (err) {
+    console.log("Failed to remove cookie popup:", err);
+  }
+}
+
 
 //ClickPopupsButton
 async function clickPopups(page) {
   console.log("🔍 Checking for popups...");
 
+  /* -----------------------------------------
+   * 1️⃣ HIGH-PRIORITY DIRECT BUTTON MATCHING
+   * ----------------------------------------- */
+  const directSelectors = [
+    "#rejectButton",
+    ".ccp-btn.decline",
+    "#closeButton",
+    "button.close",
+    "button[aria-label='Close']",
+    "button.dismiss",
+    "[data-action='reject']",
+    "[data-action='decline']",
+  ];
+
+  const directClicked = await page.evaluate((sels) => {
+    for (const sel of sels) {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.scrollIntoView({ block: "center", behavior: "instant" });
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }, directSelectors);
+
+  if (directClicked) {
+    console.log("🖱️ Direct cookie popup button clicked.");
+    await sleep(800);
+    return;
+  }
+
+  /* -----------------------------------------
+   * 2️⃣ FALLBACK: SEMANTIC TEXT MATCHING
+   * ----------------------------------------- */
   const matches = await findAllMatchingElements(page, SEARCH_TERMS);
   if (matches.length === 0) {
     console.log("ℹ️ No clickable popups found.");
     return;
   }
 
-  // Remove duplicates by text
+  // dedupe
   const unique = [];
   const seen = new Set();
   for (const el of matches) {
@@ -516,25 +571,25 @@ async function clickPopups(page) {
 
   console.log(`🧹 Found ${unique.length} unique clickable element(s):`);
   for (const el of unique) {
-    const matched = SEARCH_TERMS.filter(t =>
+    const matched = SEARCH_TERMS.filter((t) =>
       el.text.toLowerCase().includes(t.toLowerCase())
     );
     console.log(`   → <${el.tag}> "${el.text}" [${matched.join(", ")}]`);
   }
 
-  // ✅ Click only the first one that’s visible
   const first = unique[0];
   if (!first) {
     console.log("ℹ️ No valid popup button to click.");
     return;
   }
 
-  console.log(`🖱️ Clicking popup button once: "${first.text}"`);
+  console.log(`🖱️ Clicking popup: "${first.text}"`);
   await clickElements(page, [first]);
-  await sleep(1000);
+  await sleep(800);
 
   console.log("✅ Popup click pass done.\n");
 }
+
 
 
 
@@ -690,12 +745,18 @@ async function removeAdWrappers(page) {
  */
 async function clickExpandableContent(page) {
   const EXPAND_TERMS = [
+    "show full",
     "show full article",
+    "show full story",
     "view full story",
     "load more",
     "continue reading",
     "show more",
-    "expand"
+    "expand",
+    "see more",
+    "read full article",
+    "read full",
+    "read",
   ];
 
   console.log("🔍 Searching for expandable content triggers...");
@@ -704,6 +765,7 @@ async function clickExpandableContent(page) {
     const lower = (s) => (s || "").toLowerCase();
 
     const isVisible = (el) => {
+      if (!el) return false;
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
       return (
@@ -717,28 +779,91 @@ async function clickExpandableContent(page) {
 
     let btn = null;
 
+    /* --------------------------------------------------------
+     * 1️⃣ DIRECT SUPPORT — VdArt (Asianet)
+     * -------------------------------------------------------- */
+    btn =
+      document.querySelector(".VdArt-Exp_btn__link") ||
+      document.querySelector(".VdArt-Exp_btn__down") ||
+      document.querySelector(".VdArt-Exp_btn__wrp a");
+    if (btn && !isVisible(btn)) btn = null;
 
-    // 🧩 2️⃣ Generic fallback for all other “expand” buttons
+    /* --------------------------------------------------------
+     * 2️⃣ Asianet "READ FULL ARTICLE" button
+     * -------------------------------------------------------- */
     if (!btn) {
-      const sel = "button, a, [role='button'], span[role='button'], div, span";
-      const all = Array.from(document.querySelectorAll(sel));
+      btn = document.querySelector("button.btnreadfull");
+      if (btn && !isVisible(btn)) btn = null;
+    }
 
-      btn = all.find((el) => {
-        const text = (el.innerText || el.textContent || "").trim();
-        if (!text || text.length > 80) return false;
-        const t = lower(text);
-        return terms.some((term) => t.includes(lower(term))) && isVisible(el);
-      });
+    /* --------------------------------------------------------
+     * 3️⃣ Wrapper .readfullartidlebox
+     * -------------------------------------------------------- */
+    if (!btn) {
+      const box = document.querySelector(".readfullartidlebox");
+      if (box && isVisible(box)) {
+        btn = box.querySelector("button, a, div[role='button']");
+      }
+      if (btn && !isVisible(btn)) btn = null;
+    }
+
+      /* --------------------------------------------------------
+      * 4️⃣ Fallback: generic .VdArt wrapper
+      * -------------------------------------------------------- */
+      if (!btn) {
+        btn = document.querySelector(".VdArt-Exp_btn__wrp");
+        if (btn && !isVisible(btn)) btn = null;
+      }
+
+      /* --------------------------------------------------------
+      * 4.5️⃣ NEW — Taboola/TimesNow/Other News Sites "Read Full Story"
+      * -------------------------------------------------------- */
+      if (!btn) {
+        btn = document.querySelector("a.tbl-read-more-btn, a.tbl-read-more-trecs-btn");
+        if (btn && !isVisible(btn)) btn = null;
+      }
+
+        /* --------------------------------------------------------
+         * 5️⃣ MUI buttons ("Show Full Article")
+         * -------------------------------------------------------- */
+        if (!btn) {
+          const candidates = Array.from(
+            document.querySelectorAll(
+              "button.MuiButton-root, button.MuiButtonBase-root, button"
+            )
+          );
+    
+          btn = candidates.find((el) => {
+            if (!isVisible(el)) return false;
+            const text = (el.innerText || "").toLowerCase().trim();
+            return terms.some((term) => text.includes(term));
+          });
+        }
+    
+        /* --------------------------------------------------------
+         * 6️⃣ FINAL fallback (role-based only)
+         * -------------------------------------------------------- */
+        if (!btn) {
+          const sel = "button, a[role='button'], span[role='button'], div[role='button']";
+          const all = Array.from(document.querySelectorAll(sel));
+    
+          btn = all.find((el) => {
+            if (!isVisible(el)) return false;
+            const text = (el.innerText || "").toLowerCase().trim();
+            return terms.some((term) => text.includes(term));
+          });
     }
 
     if (!btn) return false;
 
     btn.scrollIntoView({ block: "center", behavior: "instant" });
-    await new Promise((r) => setTimeout(r, 200)); // brief delay
+    await new Promise((r) => setTimeout(r, 150));
 
     try {
       ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) =>
-        btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }))
+        btn.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+        )
       );
     } catch {
       btn.click();
@@ -753,9 +878,9 @@ async function clickExpandableContent(page) {
   }
 
   console.log(`🖱️ Programmatically clicked expandable trigger: "${clicked}"`);
-  await sleep(1000);
+  await sleep(800);
 
-  // 🧩 Verify expansion by paragraph count
+  // Verify expansion
   const expanded = await page.evaluate(() => {
     const art = document.querySelector("article, main, section") || document.body;
     const p = art.querySelectorAll("p");
@@ -771,17 +896,17 @@ async function clickExpandableContent(page) {
 }
 
 
-
-
 /**
- * Clicks "Read More" button on pages like News18.
- * Covers both div/span wrapper patterns and generic ones.
+ * Unified & enhanced "Read More" clicker.
+ * Supports News18 patterns, generic buttons, and:
+ *   <button id="expandbtn" class="expand-text-article-button">Read more</button>
  */
 async function clickReadMore(page) {
   console.log("🔍 Looking specifically for a 'Read More' button...");
 
   const success = await page.evaluate(async () => {
     const isVisible = (el) => {
+      if (!el) return false;
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
       return (
@@ -793,53 +918,96 @@ async function clickReadMore(page) {
       );
     };
 
-    // Try the known News18-specific structure first
-    let btn =
-      document.querySelector("div[id^='readmore_story'] .news18_read_more") ||
-      document.querySelector(".news18_read_more") ||
-      document.querySelector("div[id^='readmore_story'], .rmbtn-box");
+    let btn = null;
+
+    /* ---------------------------------------------------------
+     * 1️⃣ Explicit ABP Live selectors (your new element)
+     * --------------------------------------------------------- */
+    btn =
+      document.querySelector("#read-full-article") ||
+      document.querySelector(".article-more") ||
+      document.querySelector(".abp-story-article-more");
 
     if (btn && !isVisible(btn)) btn = null;
 
-    // If not found, try generic matches
+
+    /* ---------------------------------------------------------
+     * 2️⃣ Existing expandbtn pattern
+     * --------------------------------------------------------- */
+    if (!btn) {
+      btn =
+        document.querySelector("#expandbtn") ||
+        document.querySelector(".expand-text-article-button");
+
+      if (btn && !isVisible(btn)) btn = null;
+    }
+
+    /* ---------------------------------------------------------
+     * 3️⃣ News18-specific selectors
+     * --------------------------------------------------------- */
+    if (!btn) {
+      btn =
+        document.querySelector("div[id^='readmore_story'] .news18_read_more") ||
+        document.querySelector(".news18_read_more") ||
+        document.querySelector("div[id^='readmore_story'], .rmbtn-box");
+
+      if (btn && !isVisible(btn)) btn = null;
+    }
+
+    /* ---------------------------------------------------------
+     * 4️⃣ Generic fallback matcher
+     * --------------------------------------------------------- */
     if (!btn) {
       const candidates = Array.from(document.querySelectorAll("button, a, span, div"));
       btn = candidates.find((el) => {
         const text = (el.innerText || el.textContent || "").trim().toLowerCase();
         return text === "read more" || text.includes("read more");
       });
+
+      if (btn && !isVisible(btn)) btn = null;
     }
 
+    /* ---------------------------------------------------------
+     * No button found
+     * --------------------------------------------------------- */
     if (!btn) {
       console.log("❌ No 'Read More' found in DOM.");
       return false;
     }
 
+    /* ---------------------------------------------------------
+     * Click it
+     * --------------------------------------------------------- */
     btn.scrollIntoView({ block: "center", behavior: "instant" });
-    await new Promise((r) => setTimeout(r, 200)); // brief delay before click
+    await new Promise((r) => setTimeout(r, 200));
 
-    // Dispatch full event chain for reliability
     try {
       ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
         btn.dispatchEvent(
-          new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+          new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          })
         );
       });
-    } catch {
+    } catch (e) {
+      console.warn("Fallback: btn.click()", e);
       btn.click();
     }
 
-    console.log("✅ Clicked Read More:", btn.outerHTML.slice(0, 120));
+    console.log("✅ Clicked Read More:", btn.outerHTML.slice(0, 160));
     return true;
   });
 
   if (success) {
     console.log("🖱️ 'Read More' click executed successfully.");
-    await sleep(1000);
+    await new Promise((r) => setTimeout(r, 1000));
   } else {
     console.log("ℹ️ No 'Read More' button clicked.");
   }
 }
+
 
 
 /**
@@ -881,11 +1049,105 @@ async function clickBottomFooterButton(page) {
 }
 
 
+async function injectHeaderHideCSS(page) {
+  await page.evaluate(() => {
+    try {
+      let style = document.getElementById('__hide_headers_style');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = '__hide_headers_style';
+        document.head.appendChild(style);
+      }
+
+      style.textContent = `
+        /* ============================
+           GLOBAL HEADER REMOVALS
+        ============================ */
+        header,
+        nav,
+        [class*="header"],
+        [class*="top-bar"],
+        [class*="menu-bar"],
+        [class*="headMenu"],
+        [class*="fixedNav"],
+        [class*="leftFixedNav"],
+        [class*="leftSecNav"],
+        [class*="moreNav"],
+        [id*="sticky"],
+        [id*="header"],
+        [id*="navbar"],
+        [style*="position:fixed"],
+        [style*="position: sticky"] {
+          display: none !important;
+          visibility: hidden !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+          position: static !important;
+        }
+
+        /* ============================
+           INDIA.COM HEADER BLOCKS
+        ============================ */
+        section.content > .logo-wrap,
+        .logo-wrap,
+        .logo-hamburger,
+        .top-right-content,
+        .primary-wrap,
+        .secondary-wrap,
+        .main-menu,
+        .main-nav,
+        .mega-menu,
+        .mega-trigger-btn,
+        .mega-nav-all,
+        .google-follow,
+        .search,
+        .search-triger,
+        #mainMenu,
+        #mainMenu-secondary,
+        #autoNav,
+        #autoNav-secondary,
+        #login_sec,
+        #logged_info_sec,
+        .language-switch {
+          display: none !important;
+          visibility: hidden !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+          position: static !important;
+        }
+
+        /* remove inline clipped containers */
+        [style*="overflow:hidden"],
+        [style*="overflow: clip"] {
+          overflow: visible !important;
+        }
+
+        /* ============================
+           LAYOUT RESTORATION
+        ============================ */
+        html, body {
+          height: auto !important;
+          overflow: visible !important;
+        }
+
+        main, article, section {
+          height: auto !important;
+          overflow: visible !important;
+          transform: none !important;
+        }
+      `;
+    } catch (err) {
+      console.warn("⚠️ Failed to inject header-hide styles:", err.message);
+    }
+  });
+}
 
 
 async function hideStickyFooters(page) {
   await page.evaluate(() => {
-    // Remove the known bottom sticky navigation bar completely
+    // Remove the known bottom sticky navigation bars completely
     document.querySelectorAll('.m-mb, .m-bm, .bottom_sticky_nav').forEach(el => {
       if (
         el.classList.contains('m-mb') ||
@@ -896,7 +1158,31 @@ async function hideStickyFooters(page) {
       }
     });
 
-    // Inject or update footer/bottom nav hide style (keeps original functionality)
+    // ⭐ NEW — remove Scroll.in sticky-bottom carousel
+    document.querySelectorAll(
+      '.sticky-bottom-carousel, ' +
+      '[class*="sticky-bottom-carousel"], ' +
+      '.carousel-is-sticky'
+    ).forEach(el => el.remove());
+
+
+    // ⭐ NEW — Remove IndiaToday / AI Recommended footer widget
+    document.querySelectorAll(
+      '.recommended__widget, ' +
+      '[class*="AiRecommended_recommended__widget"], ' + 
+      '.AiRecommended_recommended__widget__ZkRo0, ' +
+      '.AiRecommended_recommendedCarousel__close__UUtA0, ' +
+      '[class*="recommendedCarousel__close"], ' +
+      '[class*="AiRecommended_slideContainer"], ' +
+      '[class*="AiRecommended_recommended__slide"], ' +
+      '.carousel__recommended'
+    ).forEach(el => el.remove());
+
+
+
+    // =============================
+    // Inject / Update hide CSS
+    // =============================
     let style = document.getElementById('__hide_footer_style');
     if (!style) {
       style = document.createElement('style');
@@ -911,6 +1197,7 @@ async function hideStickyFooters(page) {
       [class*="footer"],
       [id*="footer"],
       [class*="FtrWdg"],
+
       /* Extended: hide mobile bottom nav and sticky bars */
       [class*="bottom-nav"],
       [class*="mobile-bottom-bar"],
@@ -918,7 +1205,22 @@ async function hideStickyFooters(page) {
       [id*="bottomBar"],
       .bottom_sticky_nav,
       .m-mb,
-      .m-bm {
+      .m-bm,
+
+      /* Hide Scroll.in sticky-bottom carousel */
+      .sticky-bottom-carousel,
+      [class*="sticky-bottom-carousel"],
+      .carousel-is-sticky,
+
+      /* NEW — Hide IndiaToday AI recommended footer sliders */
+      .recommended__widget,
+      [class*="AiRecommended_recommended__widget"],
+      .AiRecommended_recommendedCarousel__close__UUtA0,
+      [class*="recommendedCarousel__close"],
+      [class*="AiRecommended_slideContainer"],
+      [class*="AiRecommended_recommended__slide"],
+      .carousel__recommended
+      {
         display: none !important;
         visibility: hidden !important;
         height: 0 !important;
@@ -939,6 +1241,57 @@ async function hideStickyFooters(page) {
       }
     `;
   });
+}
+
+
+async function removeAvpVideo(page) {
+  // Try clicking the Video.js close button first
+  const clicked = await page.evaluate(() => {
+    const btn = document.querySelector(
+      '.vjs-close-button.vjs-control.vjs-button.ubp-close'
+    );
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    return false;
+  });
+
+  if (clicked) {
+    console.log("🖱️ Clicked AVP close button.");
+    // Give the UI a moment to collapse before removing leftovers
+    await sleep(300);
+  }
+
+  // Existing cleanup logic
+  const removed = await page.evaluate(() => {
+    const selectors = [
+      'avp-content',
+      '[class*="avp-content"]',
+      'video[src^="blob:"][playsinline]',
+      'video[src^="blob:"]'
+    ];
+
+    let count = 0;
+
+    selectors.forEach(sel => {
+      document.querySelectorAll(sel).forEach(el => {
+        el.remove();
+        count++;
+      });
+    });
+
+    document.querySelectorAll('div').forEach(div => {
+      if (div.innerHTML.includes('<avp-content')) {
+        div.remove();
+        count++;
+      }
+    });
+
+    return count;
+  });
+
+  console.log(`🧹 Removed ${removed} AVP / blob video element(s).`);
 }
 
 
@@ -1180,7 +1533,7 @@ async function clickLoadMoreAndScroll(page) {
 
 async function captureWithSingleFile(page, outdir, filename = "singleFile.html") {
   const savePath = path.join(outdir, filename);
-
+  
   const sfData = await page.evaluate(async (zipScript) => {
     return await window.singlefile.getPageData({
       compressContent: false,
@@ -1342,17 +1695,17 @@ async function saveArchive(page, url) {
   fssync.writeFileSync(htmlPath, modifiedHtml, "utf8");
   console.log(`✅ Saved sanitized HTML: ${htmlPath}`);
 
-  //await triggerLazyLoadScroll(page);
+  // await triggerLazyLoadScroll(page);
   //await clickPopups(page);
   //await clickVisualCloseButton(page);
-  //await directClickAnyCloseButton(page);
+  // await directClickAnyCloseButton(page);
   //await page.setBypassCSP(true);
   //await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
 
-  await clickExpandableContent(page); 
+  // await clickExpandableContent(page); 
   
   //await hideStickyFooters(page);
-  await sleep(300);
+  // await sleep(300);
 
 
 // 🧩 Fix ThePrint white PDF/screenshot issue
@@ -1369,19 +1722,28 @@ async function saveArchive(page, url) {
 //   window.scrollTo(0, 0);
 // });
 
-
+// await removeAvpVideo(page);
+// await clickPopups(page);
 
 
 // 🧭 ensure scroll, animations, and network quiet before screenshot
-await page.evaluate(() => new Promise(resolve => {
-  window.scrollTo(0, 0);
-  requestAnimationFrame(() => {
-    setTimeout(resolve, 1200); // small buffer for sticky/animation settle
-  });
-}));
-await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
+// await page.evaluate(() => new Promise(resolve => {
+//   window.scrollTo(0, 0);
+//   requestAnimationFrame(() => {
+//     setTimeout(resolve, 1200); // small buffer for sticky/animation settle
+//   });
+// }));
+
+// await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
 //await clickBottomFooterButton(page); 
   //await removeFooterAds(page);
+
+  // await injectHeaderHideCSS(page);
+
+  // await sleep(1000);
+
+  // await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {});
+  
 	const screenshotPath = path.join(outdir, "screenshot.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`✅ Saved Screenshot: ${screenshotPath}`);
@@ -1391,80 +1753,22 @@ await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {})
   //} catch {}
   //await sleep(400);
 
-  await triggerLazyLoadScroll(page);
-  //await clickPopups(page);
+  // await triggerLazyLoadScroll(page);
+  // await clickPopups(page);
   //await clickVisualCloseButton(page);
   //await directClickAnyCloseButton(page);
   //await removeBackToTopButton(page);
   //await removeAdWrappers(page);
-  //await sleep(300);
-
+  await sleep(300);
 
   const pdfPath = path.join(outdir, "page.pdf");
 
 	// Wait for layout to stabilize before PDF
-	await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
+	// await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(() => {});
+  // await removeAvpVideo(page);
 
-
-
-// await page.evaluate(() => {
-//   try {
-//     let style = document.getElementById('__hide_headers_style');
-//     if (!style) {
-//       style = document.createElement('style');
-//       style.id = '__hide_headers_style';
-//       document.head.appendChild(style);
-//     }
-
-//     style.textContent = `
-//       /* Hide sticky headers, navbars, and floating menus */
-//       header,
-//       nav,
-//       [class*="header"],
-//       [class*="top-bar"],
-//       [class*="menu-bar"],
-//       [class*="headMenu"],
-//       [class*="fixedNav"],
-//       [class*="leftFixedNav"],
-//       [class*="leftSecNav"],
-//       [class*="moreNav"],
-//       [id*="sticky"],
-//       [id*="header"],
-//       [id*="navbar"],
-//       [style*="position:fixed"],
-//       [style*="position: sticky"] {
-//         display: none !important;
-//         visibility: hidden !important;
-//         height: 0 !important;
-//         min-height: 0 !important;
-//         overflow: hidden !important;
-//         position: static !important;
-//       }
-
-//       /* Restore normal flow */
-//       html, body {
-//         height: auto !important;
-//         overflow: visible !important;
-//       }
-
-//       main, article, section {
-//         height: auto !important;
-//         overflow: visible !important;
-//         transform: none !important;
-//       }
-
-//       /* Force content containers to unclip */
-//       [style*="overflow:hidden"],
-//       [style*="overflow: clip"] {
-//         overflow: visible !important;
-//       }
-//     `;
-//   } catch (err) {
-//     console.warn("⚠️ Failed to inject header-hide styles:", err.message);
-//   }
-// });
-
-
+  // hide headers before PDF and before SingleFile capture
+  // await injectHeaderHideCSS(page);
 
 	//await hideStickyFooters(page);
 	//await removeIzootoBranding(page);
@@ -1472,38 +1776,40 @@ await page.waitForNetworkIdle({ idleTime: 800, timeout: 10000 }).catch(() => {})
 
 
 	// ✅ Minimal anti-clip patch for screen PDFs
-	await page.evaluate(() => {
-	  document.querySelectorAll('*').forEach(e => {
-	    const s = getComputedStyle(e);
-	    if (s.overflow.includes('hidden')) e.style.overflow = 'visible';
-	    if (['fixed','sticky'].includes(s.position)) e.style.position = 'static';
-	  });
-	  document.body.style.overflow = document.documentElement.style.overflow = 'visible';
-	});
-	await sleep(300); // small repaint buffer
+	// await page.evaluate(() => {
+	//   document.querySelectorAll('*').forEach(e => {
+	//     const s = getComputedStyle(e);
+	//     if (s.overflow.includes('hidden')) e.style.overflow = 'visible';
+	//     if (['fixed','sticky'].includes(s.position)) e.style.position = 'static';
+	//   });
+	//   document.body.style.overflow = document.documentElement.style.overflow = 'visible';
+	// });
+	// await sleep(1000); // small repaint buffer
 
 
 // Fix ThePrint white rendering (GPU layer + overflow issue)
-await page.evaluate(() => {
-  document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
-    const s = getComputedStyle(el);
-    if (s.transform && s.transform !== 'none') el.style.transform = 'none';
-    if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
-    if (s.height && s.height !== 'auto') el.style.height = 'auto';
-    if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
-  });
-  document.body.style.background = '#fff';
-  document.documentElement.style.background = '#fff';
-});
+// await page.evaluate(() => {
+//   document.querySelectorAll('html, body, main, article, section, div').forEach(el => {
+//     const s = getComputedStyle(el);
+//     if (s.transform && s.transform !== 'none') el.style.transform = 'none';
+//     if (s.overflow.includes('hidden')) el.style.overflow = 'visible';
+//     if (s.height && s.height !== 'auto') el.style.height = 'auto';
+//     if (s.maxHeight && s.maxHeight !== 'none') el.style.maxHeight = 'none';
+//   });
+//   document.body.style.background = '#fff';
+//   document.documentElement.style.background = '#fff';
+// });
 
+  // await injectHeaderHideCSS(page);
 
 	// await sleep(3000);
+
 	await page.setViewport({ width: 1440, height: 900 });
 	await page.emulateMediaType('screen');
 	await page.pdf({
 	  path: pdfPath,
 	  format: 'A4',
-	  margin: {bottom: "8px"},
+	  margin: {bottom: "8px", left: "8px"},
 	  printBackground: true,
 	  scale: 0.98
 	});
@@ -1527,54 +1833,402 @@ await page.evaluate(() => {
   fssync.writeFileSync(path.join(outdir, "meta.json"), JSON.stringify(meta, null, 2));
   console.log("🧾 Saved meta.json");
 
+//   console.log("🔄 Preparing clean environment for SingleFile…");
 
-  console.log("🔄 Preparing clean environment for SingleFile…");
+//   // 🔥 Remove earlier click-blockers, unload blockers, sticky patches
+//   await page.evaluate(() => {
+//     try {
+//       window.onbeforeunload = null;
+//       window.onunload = null;
+//       window.__cancelNavigationPatch__ = false;
+//       document.querySelectorAll('style#__hide_footer_style').forEach(s => s.remove());
+//       document.querySelectorAll('style#__onesignal_bell_block__').forEach(s => s.remove());
+//     } catch {}
+//   });
 
-  // 🔥 Remove earlier click-blockers, unload blockers, sticky patches
-  await page.evaluate(() => {
-    try {
-      window.onbeforeunload = null;
-      window.onunload = null;
-      window.__cancelNavigationPatch__ = false;
-      document.querySelectorAll('style#__hide_footer_style').forEach(s => s.remove());
-      document.querySelectorAll('style#__onesignal_bell_block__').forEach(s => s.remove());
-    } catch {}
-  });
+//   // 🔥 RE-INJECT SingleFile BEFORE reload
+//   await page.evaluateOnNewDocument(() => {}); // flush previous scripts
+//   await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+//   await page.evaluateOnNewDocument(`
+//     ${SINGLEFILE_SCRIPT}
+//     window.singlefile = singlefile;
+//   `);
 
-  // 🔥 RE-INJECT SingleFile BEFORE reload
-  await page.evaluateOnNewDocument(() => {}); // flush previous scripts
-  await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
-  await page.evaluateOnNewDocument(`
-    ${SINGLEFILE_SCRIPT}
-    window.singlefile = singlefile;
-  `);
+// console.log("🔄 Reloading clean page (sandbox reset)…");
 
-console.log("🔄 Reloading clean page (sandbox reset)…");
+// await page.evaluate(() => {
+//   try {
+//     // 1. Remove direct handlers
+//     window.onbeforeunload = null;
 
-// Step 1: Completely reset the world by loading a blank document
-await page.goto("about:blank", { waitUntil: "domcontentloaded" });
+//     // 2. Override the property
+//     Object.defineProperty(window, "onbeforeunload", {
+//       get() { return null; },
+//       set() {},  // ignore
+//     });
 
-// Step 2: Re-inject SingleFile engine on clean context
-await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
-await page.evaluateOnNewDocument(`
+//     // 3. Block addEventListener("beforeunload")
+//     const origAdd = EventTarget.prototype.addEventListener;
+//     EventTarget.prototype.addEventListener = function(type, listener, opts) {
+//       if (type === "beforeunload") return;
+//       return origAdd.call(this, type, listener, opts);
+//     };
+
+//     // 4. Block returnValue assignments
+//     Object.defineProperty(Event.prototype, "returnValue", {
+//       get() { return undefined; },
+//       set() {} // ignore
+//     });
+//   } catch {}
+// });
+
+
+// // Step 1: Completely reset the world by loading a blank document
+// await page.goto("about:blank", { waitUntil: "domcontentloaded" });
+
+// // Step 2: Re-inject SingleFile engine on clean context
+// await page.evaluateOnNewDocument(SINGLEFILE_HOOK);
+// await page.evaluateOnNewDocument(`
+//   ${SINGLEFILE_SCRIPT}
+//   window.singlefile = singlefile;
+// `);
+
+// // Step 3: Navigate to target URL WITHOUT heavy JS execution
+// await page.setJavaScriptEnabled(true);
+// await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+// //await page.setJavaScriptEnabled(true);
+
+// page.on("dialog", async dialog => {
+//   // Handle native browser beforeunload confirmation
+//   if (dialog.type() === "beforeunload") {
+//     console.log("⚠️ Auto-accepting beforeunload dialog (Leave site)");
+//     await dialog.accept();     // this is clicking "Leave"
+//   } else {
+//     await dialog.dismiss();
+//   }
+// });
+
+// // Step 4: Let JS run now that SingleFile engine is ready
+// await page.evaluate(() => new Promise(r => setTimeout(r, 1500)));
+
+// // Step 5: Load lazy elements
+// // await triggerLazyLoadScroll(page);
+
+
+// // await clickReadMore(page);
+// // await removeCookiePopup(page);
+
+// // await clickExpandableContent(page);
+// // await removeAvpVideo(page);
+// // await clickExpandableContent(page);
+
+// // await removeCookiePopup(page);
+// // await clickPopups(page);
+// // await clickReadMore(page);
+// await sleep(200);
+// // Step 6: Capture
+
+
+// // Force layout stabilization
+// await page.evaluate(() => {
+//   document.body.offsetHeight; // trigger reflow
+//   window.scrollTo(0, 0);
+// });
+// await sleep(300);
+
+// console.log("📦 Running final SingleFile capture…");
+
+// await captureWithSingleFile(page, outdir, "singleFile.html");
+
+// console.log("🔄 Preparing clean environment for SingleFile (isolated tab)…");
+
+// // Create a fresh page just for SingleFile
+// const sfPage = await page.browser().newPage();
+
+// // (Optional) copy user agent to match the main page
+// try {
+//   const ua = await page.userAgent();
+//   await sfPage.setUserAgent(ua);
+// } catch {}
+
+// // (Optional but recommended) copy cookies so auth/session is preserved
+// try {
+//   const cookies = await page.cookies();
+//   if (cookies.length) {
+//     await sfPage.setCookie(...cookies);
+//   }
+// } catch {}
+
+// console.log("🔄 Preloading SingleFile hooks in new tab…");
+// await sfPage.evaluateOnNewDocument(SINGLEFILE_HOOK);
+// await sfPage.evaluateOnNewDocument(`
+//   ${SINGLEFILE_SCRIPT}
+//   window.singlefile = singlefile;
+//   // expose for convenience if needed
+//   window.singlefileInstance = singlefile;
+// `);
+
+// console.log("🔄 Loading target URL in SingleFile tab…");
+// await sfPage.setJavaScriptEnabled(true);
+
+// // For this pass, domcontentloaded is usually enough and safer
+// await sfPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+
+// // Let site JS settle a bit (hydration, lazy stuff)
+// await sfPage.evaluate(() => new Promise(r => setTimeout(r, 1500)));
+// await sleep(200);
+
+// // Optional: small layout stabilization
+// await sfPage.evaluate(() => {
+//   document.body && document.body.offsetHeight;
+//   window.scrollTo(0, 0);
+// });
+// await sleep(300);
+
+// await clickExpandableContent(sfPage);
+// await triggerLazyLoadScroll(sfPage);
+
+
+// await page.evaluate(async () => {
+//   const embeds = document.querySelectorAll(
+//     'iframe[src*="indiatoday.in/share/video"], iframe[src*="/embed/"], iframe[src*="youtube.com"], iframe[src*="twitter.com"]'
+//   );
+//   for (const iframe of embeds) {
+//     try {
+//       // Force real src (remove lazy attributes)
+//       if (iframe.hasAttribute('data-src') && !iframe.src) {
+//         iframe.src = iframe.getAttribute('data-src');
+//       }
+//       iframe.removeAttribute('loading');
+//       iframe.style.minHeight = '300px';
+//       iframe.style.display = 'block';
+//     } catch (e) {
+//       console.error('Embed fix error:', e);
+//     }
+//   }
+// });
+
+
+
+// console.log("📦 Running final SingleFile capture (isolated tab)…");
+// await captureWithSingleFile(sfPage, outdir, "singleFile.html");
+
+// // Close the SingleFile-only tab; main page stays untouched
+// await sfPage.close();
+
+
+console.log("🔄 Preparing clean environment for SingleFile (isolated tab)…");
+
+const sfPage = await page.browser().newPage();
+
+try {
+  const ua = await page.userAgent();
+  await sfPage.setUserAgent(ua);
+} catch {}
+
+try {
+  const cookies = await page.cookies();
+  if (cookies.length) await sfPage.setCookie(...cookies);
+} catch {}
+
+console.log("🔄 Preloading SingleFile hook on new tab…");
+await sfPage.evaluateOnNewDocument(SINGLEFILE_HOOK);
+await sfPage.evaluateOnNewDocument(`
   ${SINGLEFILE_SCRIPT}
   window.singlefile = singlefile;
+  window.singlefileInstance = singlefile;
 `);
 
-// Step 3: Navigate to target URL WITHOUT heavy JS execution
-await page.setJavaScriptEnabled(false);
-await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-await page.setJavaScriptEnabled(true);
+console.log("🔄 Loading target URL in SingleFile tab…");
+await sfPage.setJavaScriptEnabled(true);
+await sfPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-// Step 4: Let JS run now that SingleFile engine is ready
-await page.evaluate(() => new Promise(r => setTimeout(r, 1500)));
+// ▶️ Expand "Read full story" / "Show full article"
+await clickExpandableContent(sfPage);
 
-// Step 5: Load lazy elements
-await triggerLazyLoadScroll(page);
+// 🕒 Wait for recommended / must-watch widgets
+await sfPage.evaluate(async () => {
+  const selector = '.recommended__widget, .AiRecommended_recommended__widget__ZkRo0, .MustWatchContainer, #tab-video-wrapper-plugin';
+  const timeout = 6000;
+  const start = Date.now();
+  while (!document.querySelector(selector) && Date.now() - start < timeout) {
+    await new Promise(r => setTimeout(r, 200));
+  }
+});
 
-// Step 6: Capture
-console.log("📦 Running final SingleFile capture…");
-await captureWithSingleFile(page, outdir, "singleFile.html");
+// 🚀 Scroll page to load lazy iframes
+await sfPage.evaluate(async () => {
+  const total = document.body.scrollHeight;
+  const vp = window.innerHeight;
+  for (let y = 0; y < total; y += vp / 2) {
+    window.scrollTo(0, y);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  window.scrollTo(0, 0);
+});
+await sleep(600);
+
+
+// ⭐ Hero media click-out for India Today story
+await sfPage.evaluate(() => {
+    const heroSelector =
+      '.Story_srtymos__8Hq2k.Story_videoassocstry__V8I1i .Story_associate__image__bYOH_.topImage';
+    const hero = document.querySelector(heroSelector);
+    if (!hero) return;
+  
+    if (hero.hasAttribute('data-hero-clickout-processed')) return;
+    hero.setAttribute('data-hero-clickout-processed','1');
+      // Get embed URL from JSON-LD
+    let videoHref = null;
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+      try {
+        const data = JSON.parse(script.textContent);
+        const items = Array.isArray(data) ? data : [data];
+        items.forEach(item => {
+         if (item && item['@type'] === 'VideoObject') {
+            videoHref = videoHref || item.embedUrl || item.contentUrl || item.url;
+          }
+        });
+     } catch(e) {
+        // ignore parse errors
+      }
+    });
+  
+    if (!videoHref) {
+      videoHref = location.href;
+    }
+  
+   const img = hero.querySelector('img');
+    if (!img) return;
+  
+    const link = document.createElement('a');
+    link.href = videoHref;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    link.style.display = 'block';
+    link.style.position = 'relative';
+    link.style.textDecoration = 'none';
+  
+    img.replaceWith(link);
+    link.appendChild(img);
+      // Add play icon overlay
+    const overlay = document.createElement('div');
+    overlay.style.position = 'absolute';
+    overlay.style.top = '50%';
+    overlay.style.left = '50%';
+    overlay.style.transform = 'translate(-50%, -50%)';
+    overlay.style.width = '64px';
+    overlay.style.height = '64px';
+    overlay.style.borderRadius = '50%';
+   overlay.style.border = '2px solid rgba(255,255,255,0.8)';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+  
+    const triangle = document.createElement('div');
+   triangle.style.width = '0';
+    triangle.style.height = '0';
+    triangle.style.borderLeft = '20px solid rgba(255,255,255,0.9)';
+    triangle.style.borderTop = '12px solid transparent';
+   triangle.style.borderBottom = '12px solid transparent';
+  
+    overlay.appendChild(triangle);
+    link.appendChild(overlay);
+  });
+  
+
+
+/**
+ * ⭐ CLICK-OUT embeds (main video + all inline videos)
+ * Preserves videos as external links.
+ */
+await sfPage.evaluate(() => {
+
+  const forbiddenZones = [
+    '.recommended__widget',
+    '.AiRecommended_recommended__widget__ZkRo0',
+    '.MustWatchContainer'
+  ].map(sel => document.querySelector(sel)).filter(Boolean);
+
+  const insideForbidden = el =>
+    forbiddenZones.some(zone => zone.contains(el));
+
+  // 🔥 Must include the 3rd plugin video iframe
+  const frames = Array.from(
+    document.querySelectorAll(
+      '.embedcode iframe, iframe.multy-video-iframe, #tab-video-wrapper-plugin iframe'
+    )
+  ).filter(iframe => {
+    const src = iframe.getAttribute('src') || iframe.getAttribute('data-src') || '';
+    const rect = iframe.getBoundingClientRect();
+
+    if (rect.width < 80 || rect.height < 80) return false;
+    if (!src.includes('indiatoday.in/share/video')) return false;
+    if (insideForbidden(iframe)) return false;
+    if (iframe.closest('a')) return false;
+
+    return true;
+  });
+
+  for (const iframe of frames) {
+    try {
+      const href = iframe.getAttribute('src') || iframe.getAttribute('data-src');
+      if (!href) continue;
+
+      const wrapper = document.createElement('div');
+      wrapper.style.margin = '12px 0';
+
+      const link = document.createElement('a');
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noreferrer noopener';
+      link.style.display = 'block';
+      link.style.textDecoration = 'none';
+
+      const box = document.createElement('div');
+      box.style.width = '100%';
+      box.style.height = '240px';
+      box.style.borderRadius = '6px';
+      box.style.background = '#000';
+      box.style.position = 'relative';
+
+      const play = document.createElement('div');
+      play.style.position = 'absolute';
+      play.style.top = '50%';
+      play.style.left = '50%';
+      play.style.transform = 'translate(-50%, -50%)';
+      play.style.width = '64px';
+      play.style.height = '64px';
+      play.style.borderRadius = '50%';
+      play.style.border = '2px solid rgba(255,255,255,0.8)';
+      play.style.display = 'flex';
+      play.style.alignItems = 'center';
+      play.style.justifyContent = 'center';
+
+      const tri = document.createElement('div');
+      tri.style.width = '0';
+      tri.style.height = '0';
+      tri.style.borderLeft = '20px solid rgba(255,255,255,0.9)';
+      tri.style.borderTop = '12px solid transparent';
+      tri.style.borderBottom = '12px solid transparent';
+
+      play.appendChild(tri);
+      box.appendChild(play);
+      link.appendChild(box);
+      wrapper.appendChild(link);
+
+      iframe.replaceWith(wrapper);
+    } catch (err) {
+      console.error('click-out embed transform error:', err);
+    }
+  }
+});
+
+// 📦 Run SingleFile
+console.log("📦 Running final SingleFile capture (isolated tab)…");
+await captureWithSingleFile(sfPage, outdir, "singleFile.html");
+
+await sfPage.close();
 
 
 }
@@ -1591,6 +2245,42 @@ async function enableAdBlock(page) {
 }
 
 
+async function clickIndiaTodayPseudoPlayButton(page) {
+  // selector for the video thumbnail wrapper
+  const selector = '.Story_associate__image__bYOH_.topImage';
+
+  // Wait for the element to appear
+  const elHandle = await page.$(selector);
+  if (!elHandle) {
+    console.log("⚠️ Play-button element not found.");
+    return false;
+  }
+
+  // Read bounding box of the real element
+  const box = await elHandle.boundingBox();
+  if (!box) {
+    console.log("⚠️ Could not read bounding box.");
+    return false;
+  }
+
+  // Now compute the pseudo-element offset:
+  // From CSS:
+  // bottom: 10px;
+  // right: 10px;
+  // width: 40px;
+  // height: 40px;
+  //
+  // We click near the center of this pseudo-element.
+  const clickX = box.x + box.width - 10 - 20;   // 20 = width/2
+  const clickY = box.y + box.height - 10 - 20;  // 20 = height/2
+
+  await page.mouse.click(clickX, clickY);
+  console.log("🖱️ Clicked CSS ::before play button");
+
+  return true;
+}
+
+
 /**
  * Directly clicks any ad/video overlay close button (PlayStream, Taboola, Google Ads, etc.)
  * Fully resilient: handles detached nodes, dynamic overlays, and racey DOM updates.
@@ -1598,34 +2288,46 @@ async function enableAdBlock(page) {
 async function directClickAnyCloseButton(page) {
   try {
     const selector = [
-      // 🎯 PlayStream and in-video overlays
+      // 🎯 PlayStream and video overlays
       '[id^="ps-close-button"]',
       '[class*="ps-close-button"]',
       '[id^="ps-display-close-button"]',
       '[class*="ps-display-close-button"]',
-
+    
       // 🎯 Taboola overlays
       '.tbl-next-up-closeBtn',
       '.tbl-next-up-closeBtn-wrapper',
-      '.tbl-vignette-close-btn-wrp',   // added
-      '.tbl-close-btn',                // added (in case SVG is directly clickable)
-      '[role="button"].tbl-vignette-close-btn-wrp', // added for role-based close divs
-
+      '.tbl-vignette-close-btn-wrp',
+      '.tbl-close-btn',
+      '[role="button"].tbl-vignette-close-btn-wrp',
+    
       // 🎯 Google / DoubleClick / AdSense overlays
-      'div[style*="position: absolute"][style*="border-radius"][style*="cursor: pointer"] svg path[d*="L38 12.83"]', // typical close X path
+      'div[style*="position: absolute"][style*="border-radius"][style*="cursor: pointer"] svg path[d*="L38 12.83"]',
       'div[style*="cursor: pointer"][style*="background-color"][style*="z-index"][id^="Ne"][id*="_"]',
-
-      // 🎯 Generic fallback
+    
+      // 🎯 Video.js close button
+      '.vjs-close-button',
+      '.ubp-close',
+      'button.vjs-button[title*="close" i]',
+      'button.vjs-close-button',
+      '[class*="vjs"][class*="close" i]',
+    
+      // 🎯 Generic close buttons
       '[aria-label*="close" i]',
+      'button[title*="close" i]',
       '[role="button"][class*="close" i]',
-      'button.ICt_m', 
-      // 🎯 Picture-in-picture & generic dismiss buttons
-      '#close-pip',
+      'button.ICt_m',
       'button#close-pip',
-      'button.pip_close',
+      '.pip_close',
       'button.close-btn',
-      'button[class*="close" i]',   
-
+      'button[class*="close" i]',
+    
+      // 🎯 GDPR / custom <i> icon close buttons (NEW)
+      '.close-icon',
+      'i.close-icon',
+      'i[data-label*="closed" i]',
+      'i[class*="close" i]'
+    
     ].join(',');
 
     const timeout = 6000;
@@ -1639,12 +2341,12 @@ async function directClickAnyCloseButton(page) {
       }
 
       for (const handle of handles) {
-        const stillExists = await handle.evaluate(el => !!el.isConnected).catch(() => false);
-        if (!stillExists) continue;
+        const exists = await handle.evaluate(el => !!el.isConnected).catch(() => false);
+        if (!exists) continue;
 
         const visible = await handle.evaluate(el => {
           const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
+          const style = getComputedStyle(el);
           return (
             rect.width > 4 &&
             rect.height > 4 &&
@@ -1653,7 +2355,6 @@ async function directClickAnyCloseButton(page) {
             style.opacity !== "0"
           );
         }).catch(() => false);
-
         if (!visible) continue;
 
         try {
@@ -1661,19 +2362,17 @@ async function directClickAnyCloseButton(page) {
             el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" })
           );
 
-          // Try DOM click first
-          await handle.click({ delay: 40 });
-          console.log("✅ Clicked ad/overlay close button directly.");
+          await handle.click({ delay: 30 });
+          console.log("✅ Clicked close button (video/overlay/popup).");
           return true;
-        } catch {
-          // Fallback: synthetic event dispatch
+        } catch (err) {
           await page.evaluate(el => {
             try {
-              const evt = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
-              el.dispatchEvent(evt);
+              el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
             } catch {}
           }, handle).catch(() => {});
-          console.log("✅ Fallback dispatched manual click event to close button.");
+
+          console.log("⚠️ Fallback synthetic click sent to close button.");
           return true;
         }
       }
@@ -1688,6 +2387,7 @@ async function directClickAnyCloseButton(page) {
     return false;
   }
 }
+
 
 
 /* -------------------------------------------------------------------------- */
@@ -1709,13 +2409,12 @@ async function runArchive(url) {
       "--disable-gpu",
       "--disable-web-security",
       "--disable-features=IsolateOrigins,site-per-process"
-    
     ],
   });
 
   try {
     const page = await browser.newPage();
-    
+
 	// ------------------------------------------------------------
 	// Inject SingleFile BEFORE page loads (Critical placement)
 	// ------------------------------------------------------------
@@ -1744,11 +2443,10 @@ async function runArchive(url) {
 	  window.singlefile = singlefile;
 	`);
 
-
-
-
     console.log(`🌐 Visiting: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
+
+
     //Experiment
     await sleep(2000);
 
@@ -1759,19 +2457,84 @@ async function runArchive(url) {
       //await sleep(2000);
     //}
 
-	  
-    //await clickPopups(page);
+	  // await clickReadMore(page);
+    // await clickPopups(page);
     //await directClickAnyCloseButton(page);
+    // await removeCookiePopup(page);
+    
+    // await clickExpandableContent(page);
     await clickExpandableContent(page);
-    await clickReadMore(page);
+    // await sleep(1000);
+    await hideStickyFooters(page);
+    // await triggerLazyLoadScroll(page);    // <-- load embeds
+    // await sleep(500);
+
+    // await removeAvpVideo(page);
+// =====================================================
+//  ⛔ STOP ALL SITE JAVASCRIPT AFTER EXPANSION IS DONE
+// =====================================================
+console.log("⛔ Stopping all site JavaScript…");
+
+// Freeze site JS alive
+await page.evaluate(() => {
+  // Stop timers
+  window.setTimeout = () => {};
+  window.setInterval = () => {};
+  window.requestAnimationFrame = () => {};
+  window.cancelAnimationFrame = () => {};
+  window.onbeforeunload = null;
+  window.onunload = null;
+
+  // Block ANY event listeners
+  const block = e => {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  };
+  [
+    "click",
+    "touchstart", "touchend", "touchmove",
+    "keydown", "keyup", "keypress",
+    "beforeunload"
+  ].forEach(evt => {
+    window.addEventListener(evt, block, true);
+  });
+
+  // Disable mutation observers
+  window.MutationObserver = class {
+    constructor() {}
+    observe() {}
+    disconnect() {}
+  };
+
+  // Kill XHR and fetch
+  window.fetch = () => new Promise(() => {});
+  window.XMLHttpRequest = class {
+    open() {}
+    send() {}
+  };
+
+  console.log("JS freeze applied (window locked).");
+});
+
+// Fully disable JS execution for future operations
+await page.setJavaScriptEnabled(false);
+
+console.log("⛔ JavaScript disabled completely. Page frozen.");
+
+
+    
     //await clickLoadMoreAndScroll(page);
     
     //await removeJioSaavnWidget(page);
+    // await removeCookiePopup(page);
+    // await clickPopups(page);
 
-    await clickBottomFooterButton(page);
+    // await directClickAnyCloseButton(page);
+    // await clickBottomFooterButton(page);
     
-    await removeAllGoogleAds(page);
-    
+    // await removeAllGoogleAds(page);
+    // await clickReadMore(page);
+    // await hideStickyFooters(page);
     await saveArchive(page, url);
 
     console.log("✅ Archive done.");
